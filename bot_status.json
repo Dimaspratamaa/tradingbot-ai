@@ -1,0 +1,27 @@
+{
+  "harga": 74446.2,
+  "sinyal": "HOLD",
+  "skor_buy": 2,
+  "skor_sell": 2,
+  "detail_buy": [
+    "\ud83d\udfe1 Fear&Greed: 26 (Fear) - FEAR",
+    "\ud83d\udfe2 BTC Dominance: 56.7% (BTC kuat)"
+  ],
+  "detail_sell": [
+    "\ud83e\udd16 ML prediksi HOLD (92.8%)"
+  ],
+  "ml_pred": "HOLD",
+  "ml_conf": 92.8,
+  "posisi_aktif": false,
+  "harga_beli": 0.0,
+  "stop_loss": 0.0,
+  "take_profit": 0.0,
+  "pl_pct": 0,
+  "saldo_usdt": 9450.25136,
+  "saldo_btc": 1.002,
+  "fear_greed": 26,
+  "fear_label": "Fear",
+  "funding_rate": 0,
+  "ls_ratio": 1,
+  "waktu": "2026-03-18 10:54:51"
+}
