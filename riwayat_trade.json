@@ -105,5 +105,14 @@
     "waktu_beli": "2026-03-18 10:27:08",
     "waktu_jual": "2026-03-18 11:36:31",
     "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "ADAUSDT",
+    "harga_beli": 0.2916,
+    "harga_jual": 0.2878,
+    "profit_pct": -1.3032,
+    "waktu_beli": "2026-03-18 10:27:09",
+    "waktu_jual": "2026-03-18 14:23:23",
+    "alasan": "STOP_LOSS"
   }
 ]
