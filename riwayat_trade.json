@@ -78,5 +78,32 @@
     "waktu_beli": "2024-03-15 09:00:00",
     "waktu_jual": "2024-03-15 22:00:00",
     "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "BNBUSDT",
+    "harga_beli": 670.21,
+    "harga_jual": 662.74,
+    "profit_pct": -1.1146,
+    "waktu_beli": "2026-03-17 22:00:21",
+    "waktu_jual": "2026-03-18 11:02:18",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "harga_beli": 88.43,
+    "harga_jual": 94.87,
+    "profit_pct": 7.2826,
+    "waktu_beli": "2026-03-18 11:02:41",
+    "waktu_jual": "2026-03-18 11:07:45",
+    "alasan": "TAKE_PROFIT"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "harga_beli": 95.45,
+    "harga_jual": 94.13,
+    "profit_pct": -1.3829,
+    "waktu_beli": "2026-03-18 10:27:08",
+    "waktu_jual": "2026-03-18 11:36:31",
+    "alasan": "STOP_LOSS"
   }
 ]

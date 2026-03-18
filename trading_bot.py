@@ -1,7 +1,6 @@
 # ============================================
-# BINANCE TRADING BOT v9.2 - CLOUD EDITION
-# Auto-reconnect, graceful shutdown,
-# health check & robust error handling
+# BINANCE TRADING BOT v9.3 - CLOUD EDITION
+# Upgrade: Trailing Stop Loss + Multi Timeframe
 # ============================================
 
 from binance.client import Client
@@ -20,7 +19,6 @@ import warnings
 import signal
 import sys
 import traceback
-from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # ── KONFIGURASI ───────────────────────────────
@@ -38,39 +36,38 @@ KOIN_LIST = [
 ]
 
 # ── KONFIGURASI TRADING ───────────────────────
-INTERVAL           = Client.KLINE_INTERVAL_1HOUR
 MAX_POSISI         = 3
 MIN_SCORE_EKSEKUSI = 6
 TRADE_USDT         = 100.0
+SCAN_INTERVAL      = 300
 
-# ── KONFIGURASI RECONNECT ─────────────────────
-MAX_RECONNECT      = 10       # Maksimal percobaan reconnect
-RECONNECT_DELAY    = 30       # Detik antar reconnect
-SCAN_INTERVAL      = 300      # 5 menit antar siklus
+# ── KONFIGURASI TRAILING STOP ─────────────────
+TRAILING_AKTIVASI  = 1.5   # Aktif setelah profit +1.5%
+TRAILING_JARAK     = 1.0   # SL mengikuti 1.0% dari harga tertinggi
+
+# ── KONFIGURASI MULTI TIMEFRAME ───────────────
+TF_REQUIRED        = 2     # Minimal 2 dari 3 TF harus konfirmasi
 
 # ── STATE ─────────────────────────────────────
-semua_posisi  = {}
-onchain_cache = {"data": None, "waktu": 0}
-geo_cache     = {"data": None, "waktu": 0}
-bot_running   = True          # Flag untuk graceful shutdown
+semua_posisi    = {}
+onchain_cache   = {"data": None, "waktu": 0}
+geo_cache       = {"data": None, "waktu": 0}
+bot_running     = True
 reconnect_count = 0
+MAX_RECONNECT   = 10
+RECONNECT_DELAY = 30
 
-# ── INIT CLIENT ───────────────────────────────
+# ── INIT ──────────────────────────────────────
 def buat_client():
-    """Buat Binance client dengan retry"""
     return Client(API_KEY, API_SECRET, testnet=True)
 
 client = buat_client()
-
-# Inisialisasi Bayesian Model
-bayes = BayesianTradingModel()
+bayes  = BayesianTradingModel()
 bayes.load_model()
 
 # ── GRACEFUL SHUTDOWN ─────────────────────────
 def handle_shutdown(signum, frame):
-    """Tangani SIGTERM/SIGINT dengan bersih"""
     global bot_running
-    print("\n⛔ Sinyal shutdown diterima, menghentikan bot...")
     bot_running = False
     kirim_telegram(
         "⛔ <b>Bot dihentikan dengan aman</b>\n"
@@ -84,69 +81,44 @@ signal.signal(signal.SIGINT,  handle_shutdown)
 
 # ── FUNGSI: KIRIM TELEGRAM ────────────────────
 def kirim_telegram(pesan, retry=3):
-    """Kirim pesan Telegram dengan retry otomatis"""
     for attempt in range(retry):
         try:
             url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-            data = {
-                "chat_id"   : TG_CHAT_ID,
-                "text"      : pesan,
-                "parse_mode": "HTML"
-            }
+            data = {"chat_id": TG_CHAT_ID, "text": pesan, "parse_mode": "HTML"}
             resp = requests.post(url, data=data, timeout=15)
             if resp.status_code == 200:
                 return True
-            else:
-                print(f"  ⚠️  Telegram HTTP {resp.status_code}")
-        except Exception as e:
-            print(f"  ⚠️  Telegram gagal (percobaan {attempt+1}): {e}")
+        except:
             if attempt < retry - 1:
                 time.sleep(5)
     return False
 
-# ── FUNGSI: RECONNECT CLIENT ──────────────────
+# ── FUNGSI: RECONNECT ─────────────────────────
 def reconnect_client():
-    """Reconnect ke Binance dengan exponential backoff"""
     global client, reconnect_count
     reconnect_count += 1
-
     if reconnect_count > MAX_RECONNECT:
-        pesan = (
-            "🚨 <b>Bot OFFLINE!</b>\n\n"
-            f"❌ Gagal reconnect setelah {MAX_RECONNECT}x percobaan\n"
-            f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        kirim_telegram(
+            f"🚨 <b>Bot OFFLINE!</b>\n"
+            f"❌ Gagal reconnect {MAX_RECONNECT}x\n"
             "⚠️ Perlu restart manual!"
         )
-        kirim_telegram(pesan)
-        print(f"\n🚨 Maksimal reconnect tercapai! Bot berhenti.")
         sys.exit(1)
-
-    delay = min(RECONNECT_DELAY * reconnect_count, 300)  # Max 5 menit
-    print(f"\n  🔄 Reconnect #{reconnect_count} dalam {delay} detik...")
-
+    delay = min(RECONNECT_DELAY * reconnect_count, 300)
+    print(f"  🔄 Reconnect #{reconnect_count} dalam {delay}s...")
     if reconnect_count == 1:
         kirim_telegram(
-            "⚠️ <b>Koneksi terputus, mencoba reconnect...</b>\n"
-            f"🔄 Percobaan ke-{reconnect_count}/{MAX_RECONNECT}\n"
-            f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"⚠️ <b>Koneksi terputus, reconnect...</b>\n"
+            f"🔄 Percobaan {reconnect_count}/{MAX_RECONNECT}"
         )
-
     time.sleep(delay)
-
     try:
         client = buat_client()
-        # Test koneksi
         client.ping()
-        print(f"  ✅ Reconnect berhasil!")
-        kirim_telegram(
-            "✅ <b>Koneksi pulih!</b>\n"
-            f"🔄 Berhasil reconnect ke-{reconnect_count}\n"
-            f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        reconnect_count = 0  # Reset counter
+        kirim_telegram(f"✅ <b>Koneksi pulih!</b> (reconnect #{reconnect_count})")
+        reconnect_count = 0
         return True
-    except Exception as e:
-        print(f"  ❌ Reconnect gagal: {e}")
+    except:
         return False
 
 # ── FUNGSI: SIMPAN TRANSAKSI ──────────────────
@@ -154,13 +126,10 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
                      waktu_beli, waktu_jual, alasan):
     profit_pct = ((harga_jual - harga_beli) / harga_beli) * 100
     transaksi  = {
-        "symbol"     : symbol,
-        "harga_beli" : harga_beli,
-        "harga_jual" : harga_jual,
-        "profit_pct" : round(profit_pct, 4),
-        "waktu_beli" : waktu_beli,
-        "waktu_jual" : waktu_jual,
-        "alasan"     : alasan
+        "symbol": symbol, "harga_beli": harga_beli,
+        "harga_jual": harga_jual, "profit_pct": round(profit_pct, 4),
+        "waktu_beli": waktu_beli, "waktu_jual": waktu_jual,
+        "alasan": alasan
     }
     riwayat = []
     if os.path.exists("riwayat_trade.json"):
@@ -169,26 +138,22 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
     riwayat.append(transaksi)
     with open("riwayat_trade.json", "w") as f:
         json.dump(riwayat, f, indent=2)
-    print(f"  💾 [{symbol}] Tersimpan! P/L: {profit_pct:+.2f}%")
+    print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}%")
 
 # ── FUNGSI: CEK SALDO ─────────────────────────
 def cek_saldo():
-    saldo = {}
     try:
-        akun = client.get_account()
-        for aset in akun["balances"]:
-            if float(aset["free"]) > 0:
-                saldo[aset["asset"]] = float(aset["free"])
-        usdt = saldo.get("USDT", 0)
-        print(f"  Saldo USDT : {usdt:,.2f}")
+        akun  = client.get_account()
+        saldo = {a["asset"]: float(a["free"])
+                 for a in akun["balances"] if float(a["free"]) > 0}
+        print(f"  Saldo USDT: {saldo.get('USDT', 0):,.2f}")
+        return saldo
     except Exception as e:
         print(f"  ⚠️  Gagal cek saldo: {e}")
-    return saldo
+        return {}
 
 # ── FUNGSI: LOAD MODEL ML ─────────────────────
-model_ml    = None
-scaler_ml   = None
-features_ml = None
+model_ml = scaler_ml = features_ml = None
 
 def load_model():
     global model_ml, scaler_ml, features_ml
@@ -196,17 +161,19 @@ def load_model():
         model_ml    = joblib.load("model_ml.pkl")
         scaler_ml   = joblib.load("scaler_ml.pkl")
         features_ml = joblib.load("features_ml.pkl")
-        print("  🤖 Model ML berhasil dimuat!")
+        print("  🤖 Model ML dimuat!")
         return True
     except:
         print("  ⚠️  Model ML belum ada!")
         return False
 
-# ── FUNGSI: AMBIL DATA KOIN ───────────────────
-def get_data(symbol):
+# ══════════════════════════════════════════════
+# MULTI TIMEFRAME ANALYSIS
+# ══════════════════════════════════════════════
+
+def get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=150):
     try:
-        klines = client.get_klines(
-            symbol=symbol, interval=INTERVAL, limit=150)
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
             'time','open','high','low','close','volume',
             'close_time','quote_vol','trades',
@@ -216,10 +183,9 @@ def get_data(symbol):
             df[col] = df[col].astype(float)
         return df
     except Exception as e:
-        print(f"  ⚠️  Gagal ambil data {symbol}: {e}")
+        print(f"  ⚠️  Gagal ambil {symbol} {interval}: {e}")
         return None
 
-# ── FUNGSI: HITUNG SEMUA INDIKATOR ───────────
 def hitung_indikator(df):
     close  = df['close']
     high   = df['high']
@@ -275,21 +241,119 @@ def hitung_indikator(df):
 
     momentum_24h = ((harga - close.iloc[-25]) / close.iloc[-25]) * 100
 
+    ema20    = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50    = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    ema_bull = ema20 > ema50
+
     return {
-        "harga"      : harga,
-        "rsi"        : rsi,
-        "macd_up"    : macd_up,
-        "macd_down"  : macd_down,
-        "bb_bawah"   : bb_bawah,
-        "bb_atas"    : bb_atas,
-        "atr"        : atr,
-        "ichi_atas"  : ichi_atas,
-        "tk_up"      : tk_up,
-        "vol_tinggi" : vol_tinggi,
-        "vol_ratio"  : vol_ratio,
-        "bull_div"   : bull_div,
-        "momentum"   : momentum_24h
+        "harga": harga, "rsi": rsi,
+        "macd_up": macd_up, "macd_down": macd_down,
+        "bb_bawah": bb_bawah, "bb_atas": bb_atas,
+        "atr": atr, "ichi_atas": ichi_atas, "tk_up": tk_up,
+        "vol_tinggi": vol_tinggi, "vol_ratio": vol_ratio,
+        "bull_div": bull_div, "momentum": momentum_24h,
+        "ema_bull": ema_bull
     }
+
+def analisis_timeframe(symbol, interval, nama_tf):
+    """Analisis satu timeframe, return skor bullish 0-5"""
+    df = get_data(symbol, interval=interval)
+    if df is None:
+        return {"tf": nama_tf, "konfirmasi": False, "skor": 0, "detail": []}
+
+    ind    = hitung_indikator(df)
+    skor   = 0
+    detail = []
+
+    if ind["rsi"] < 50:
+        skor += 1
+        detail.append(f"RSI{ind['rsi']:.0f}")
+    if ind["macd_up"]:
+        skor += 1
+        detail.append("MACD↑")
+    if ind["ema_bull"]:
+        skor += 1
+        detail.append("EMA↑")
+    if ind["ichi_atas"] or ind["tk_up"]:
+        skor += 1
+        detail.append("Ichi✓")
+    if ind["momentum"] > 0:
+        skor += 1
+        detail.append(f"Mom{ind['momentum']:+.1f}%")
+
+    return {
+        "tf"        : nama_tf,
+        "konfirmasi": skor >= 3,
+        "skor"      : skor,
+        "detail"    : detail,
+        "ind"       : ind
+    }
+
+def multi_timeframe_analysis(symbol):
+    """Analisis 3 timeframe: 1H, 4H, 1D"""
+    tf_list = [
+        (Client.KLINE_INTERVAL_1HOUR, "1H"),
+        (Client.KLINE_INTERVAL_4HOUR, "4H"),
+        (Client.KLINE_INTERVAL_1DAY,  "1D"),
+    ]
+    hasil_tf  = []
+    n_konfirm = 0
+    for interval, nama in tf_list:
+        hasil = analisis_timeframe(symbol, interval, nama)
+        hasil_tf.append(hasil)
+        if hasil["konfirmasi"]:
+            n_konfirm += 1
+
+    return {
+        "timeframes"    : hasil_tf,
+        "n_konfirmasi"  : n_konfirm,
+        "semua_bullish" : n_konfirm == 3,
+        "cukup_bullish" : n_konfirm >= TF_REQUIRED,
+        "summary"       : " | ".join([
+            f"{h['tf']}:{'✅' if h['konfirmasi'] else '❌'}({h['skor']}/5)"
+            for h in hasil_tf
+        ])
+    }
+
+# ══════════════════════════════════════════════
+# TRAILING STOP LOSS
+# ══════════════════════════════════════════════
+
+def update_trailing_stop(symbol, harga_skrng):
+    """Update trailing SL jika harga naik"""
+    if symbol not in semua_posisi:
+        return False
+    pos = semua_posisi[symbol]
+    if not pos["aktif"]:
+        return False
+
+    profit_pct      = ((harga_skrng - pos["harga_beli"]) / pos["harga_beli"]) * 100
+    harga_tertinggi = pos.get("harga_tertinggi", pos["harga_beli"])
+
+    # Update harga tertinggi
+    if harga_skrng > harga_tertinggi:
+        semua_posisi[symbol]["harga_tertinggi"] = harga_skrng
+        harga_tertinggi = harga_skrng
+
+    # Aktifkan trailing jika profit cukup
+    if not pos.get("trailing_aktif") and profit_pct >= TRAILING_AKTIVASI:
+        semua_posisi[symbol]["trailing_aktif"] = True
+        print(f"  🔄 [{symbol}] Trailing AKTIF! Profit:{profit_pct:+.2f}%")
+        kirim_telegram(
+            f"🔄 <b>Trailing Stop Aktif - {symbol}</b>\n"
+            f"📈 Profit: <b>+{profit_pct:.2f}%</b>\n"
+            f"🛡️ SL otomatis mengikuti harga\n"
+            f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+    # Update SL (hanya boleh naik)
+    if pos.get("trailing_aktif"):
+        sl_baru = harga_tertinggi * (1 - TRAILING_JARAK / 100)
+        if sl_baru > pos["stop_loss"]:
+            semua_posisi[symbol]["stop_loss"] = sl_baru
+            print(f"  📈 [{symbol}] SL naik → ${sl_baru:,.4f}")
+            return True
+    return False
 
 # ── FUNGSI: PREDIKSI ML ───────────────────────
 def prediksi_ml(df):
@@ -338,7 +402,7 @@ def prediksi_ml(df):
     except:
         return "HOLD", 50.0
 
-# ── FUNGSI: CACHE ONCHAIN ─────────────────────
+# ── CACHE ONCHAIN & GEO ───────────────────────
 def get_onchain_cached():
     global onchain_cache
     sekarang = time.time()
@@ -347,21 +411,16 @@ def get_onchain_cached():
         try:
             onchain_cache["data"]  = get_onchain_score()
             onchain_cache["waktu"] = sekarang
-        except Exception as e:
-            print(f"  ⚠️  OnChain error: {e}")
+        except:
             if onchain_cache["data"] is None:
-                onchain_cache["data"] = _default_onchain()
+                onchain_cache["data"] = {
+                    "skor_buy": 0,
+                    "fear_greed": {"score": 50},
+                    "funding_rate": {"rate": 0},
+                    "btc_dominance": {"dominance": 50}
+                }
     return onchain_cache["data"]
 
-def _default_onchain():
-    return {
-        "skor_buy"      : 0,
-        "fear_greed"    : {"score": 50},
-        "funding_rate"  : {"rate": 0},
-        "btc_dominance" : {"dominance": 50}
-    }
-
-# ── FUNGSI: CACHE GEOPOLITIK ──────────────────
 def get_geo_cached():
     global geo_cache
     sekarang = time.time()
@@ -372,51 +431,29 @@ def get_geo_cached():
             geo_cache["waktu"] = sekarang
             if geo_cache["data"].get("alert"):
                 kirim_telegram(
-                    "🚨 <b>GEO ALERT - BERITA BESAR TERDETEKSI!</b>\n\n"
+                    "🚨 <b>GEO ALERT!</b>\n\n"
                     + geo_cache["data"]["alert_pesan"]
-                    + "\n\n⚠️ Bot lebih konservatif sementara waktu"
+                    + "\n\n⚠️ Bot lebih konservatif sementara"
                 )
-        except Exception as e:
-            print(f"  ⚠️  Geo error: {e}")
+        except:
             if geo_cache["data"] is None:
-                geo_cache["data"] = _default_geo()
+                geo_cache["data"] = {
+                    "skor_buy": 0, "skor_sell": 0,
+                    "sentiment": "NETRAL", "rata_skor": 0.0,
+                    "n_berita": 0, "alert": False, "alert_pesan": ""
+                }
     return geo_cache["data"]
 
-def _default_geo():
-    return {
-        "skor_buy": 0, "skor_sell": 0,
-        "sentiment": "NETRAL", "rata_skor": 0.0,
-        "n_berita": 0, "top_berita": [],
-        "alert": False, "alert_pesan": "",
-        "breakdown": {
-            "sangat_positif": 0, "positif": 0,
-            "netral": 0, "negatif": 0, "sangat_negatif": 0
-        }
-    }
-
-# ── FUNGSI: PRINT STATUS GEOPOLITIK ──────────
 def print_geo_status():
     geo = get_geo_cached()
-    sent_emoji = {
-        "SANGAT_POSITIF" : "🟢🟢",
-        "POSITIF"        : "🟢",
-        "SEDIKIT_POSITIF": "🟡",
-        "NETRAL"         : "⚪",
-        "SEDIKIT_NEGATIF": "🟠",
-        "NEGATIF"        : "🔴",
-        "SANGAT_NEGATIF" : "🔴🔴",
-    }
-    emoji = sent_emoji.get(geo["sentiment"], "⚪")
-    print(f"  🌍 Geo: {emoji} {geo['sentiment']} | "
-          f"Rata:{geo['rata_skor']:+.2f} | "
-          f"Berita:{geo['n_berita']} | "
+    em  = {"SANGAT_POSITIF":"🟢🟢","POSITIF":"🟢","SEDIKIT_POSITIF":"🟡",
+           "NETRAL":"⚪","SEDIKIT_NEGATIF":"🟠","NEGATIF":"🔴","SANGAT_NEGATIF":"🔴🔴"}
+    print(f"  🌍 Geo: {em.get(geo['sentiment'],'⚪')} {geo['sentiment']} | "
           f"Buy:+{geo['skor_buy']} Sell:-{geo['skor_sell']}")
-    if geo.get("alert"):
-        print(f"  🚨 ALERT AKTIF!")
 
-# ── FUNGSI: HITUNG SKOR KOIN ──────────────────
+# ── HITUNG SKOR KOIN ──────────────────────────
 def hitung_skor_koin(symbol):
-    df = get_data(symbol)
+    df = get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR)
     if df is None:
         return None
 
@@ -429,35 +466,26 @@ def hitung_skor_koin(symbol):
     detail = []
 
     if ind["rsi"] < 35:
-        skor += 1
-        detail.append(f"RSI oversold ({ind['rsi']:.1f})")
+        skor += 1; detail.append(f"RSI({ind['rsi']:.1f})")
     if ind["macd_up"]:
-        skor += 1
-        detail.append("MACD cross UP")
+        skor += 1; detail.append("MACD↑")
     if ind["bb_bawah"]:
-        skor += 1
-        detail.append("BB bawah")
+        skor += 1; detail.append("BB↓")
     if ind["ichi_atas"] or ind["tk_up"]:
-        skor += 1
-        detail.append("Ichimoku bullish")
+        skor += 1; detail.append("Ichi✓")
     if ind["vol_tinggi"]:
-        skor += 1
-        detail.append(f"Volume {ind['vol_ratio']:.1f}x")
+        skor += 1; detail.append(f"Vol{ind['vol_ratio']:.1f}x")
     if ind["bull_div"]:
-        skor += 1
-        detail.append("Bull Divergence")
+        skor += 1; detail.append("Div✓")
     if ind["momentum"] > 3:
-        skor += 1
-        detail.append(f"Momentum +{ind['momentum']:.1f}%")
+        skor += 1; detail.append(f"Mom+{ind['momentum']:.1f}%")
     if ml_pred == "BUY" and ml_conf >= 60:
-        skor += 2
-        detail.append(f"ML BUY ({ml_conf:.0f}%)")
+        skor += 2; detail.append(f"ML({ml_conf:.0f}%)")
     if onchain["skor_buy"] >= 1:
         skor += onchain["skor_buy"]
 
     sinyal_bayes = bayes.buat_sinyal_list(
-        rsi=ind["rsi"],
-        macd_up=ind["macd_up"], macd_down=ind["macd_down"],
+        rsi=ind["rsi"], macd_up=ind["macd_up"], macd_down=ind["macd_down"],
         bb_bawah=ind["bb_bawah"], bb_atas=ind["bb_atas"],
         ichi_bullish=(ind["ichi_atas"] or ind["tk_up"]),
         vol_tinggi=ind["vol_tinggi"], bull_div=ind["bull_div"],
@@ -467,142 +495,128 @@ def hitung_skor_koin(symbol):
         btc_dom=onchain["btc_dominance"]["dominance"]
     )
     bayes_hasil = bayes.hitung_probabilitas(sinyal_bayes)
-
     if bayes_hasil["keputusan"] == "BUY_KUAT":
-        skor += 3
-        detail.append(f"Bayes {bayes_hasil['prob_buy']}% 🔥")
+        skor += 3; detail.append(f"Bayes{bayes_hasil['prob_buy']}%🔥")
     elif bayes_hasil["keputusan"] == "BUY_LEMAH":
-        skor += 1
-        detail.append(f"Bayes {bayes_hasil['prob_buy']}% ✅")
+        skor += 1; detail.append(f"Bayes{bayes_hasil['prob_buy']}%✅")
 
-    # ── Geopolitik ──
+    # Geopolitik
     if geo["skor_buy"] >= 2:
-        skor += geo["skor_buy"]
-        detail.append(f"🌍 Geo {geo['sentiment']} (+{geo['skor_buy']})")
+        skor += geo["skor_buy"]; detail.append(f"🌍+{geo['skor_buy']}")
     elif geo["skor_buy"] == 1:
-        skor += 1
-        detail.append(f"🌍 Geo {geo['sentiment']} (+1)")
-
+        skor += 1; detail.append("🌍+1")
     if geo["skor_sell"] >= 3:
-        skor -= 4
-        detail.append(f"🔴 Geo SANGAT NEG! Block ({geo['sentiment']})")
+        skor -= 4; detail.append("🔴GeoBlock")
     elif geo["skor_sell"] == 2:
-        skor -= 2
-        detail.append(f"🟠 Geo NEGATIF (-2)")
+        skor -= 2; detail.append("🟠Geo-2")
     elif geo["skor_sell"] == 1:
-        skor -= 1
-        detail.append(f"🟡 Geo sedikit negatif (-1)")
+        skor -= 1; detail.append("🟡Geo-1")
+
+    # Multi Timeframe
+    mtf = multi_timeframe_analysis(symbol)
+    if mtf["semua_bullish"]:
+        skor += 3; detail.append(f"📊MTF3/3🔥")
+    elif mtf["cukup_bullish"]:
+        skor += 1; detail.append(f"📊MTF{mtf['n_konfirmasi']}/3✅")
+    else:
+        skor -= 1; detail.append(f"📊MTF{mtf['n_konfirmasi']}/3❌")
 
     return {
-        "symbol"  : symbol,
-        "skor"    : skor,
-        "harga"   : ind["harga"],
-        "rsi"     : ind["rsi"],
-        "atr"     : ind["atr"],
-        "momentum": ind["momentum"],
-        "ml_pred" : ml_pred,
-        "ml_conf" : ml_conf,
-        "bayes"   : bayes_hasil["prob_buy"],
-        "detail"  : detail,
-        "ind"     : ind,
-        "geo"     : geo,
+        "symbol": symbol, "skor": skor,
+        "harga": ind["harga"], "rsi": ind["rsi"],
+        "atr": ind["atr"], "momentum": ind["momentum"],
+        "ml_pred": ml_pred, "ml_conf": ml_conf,
+        "bayes": bayes_hasil["prob_buy"],
+        "detail": detail, "ind": ind,
+        "geo": geo, "mtf": mtf,
     }
 
-# ── FUNGSI: SCAN SEMUA KOIN ───────────────────
+# ── SCAN SEMUA KOIN ───────────────────────────
 def scan_semua_koin():
-    print(f"\n🔍 Scanning {len(KOIN_LIST)} koin...")
+    print(f"\n🔍 Scanning {len(KOIN_LIST)} koin (1H+4H+1D)...")
     hasil_scan = []
-
     for symbol in KOIN_LIST:
-        if (symbol in semua_posisi and
-                semua_posisi[symbol]["aktif"]):
-            print(f"  ⏭️  {symbol:12} - Posisi aktif, skip")
+        if symbol in semua_posisi and semua_posisi[symbol]["aktif"]:
+            print(f"  ⏭️  {symbol:12} - skip")
             continue
-
         try:
             hasil = hitung_skor_koin(symbol)
             if hasil:
                 emoji = "🔥" if hasil["skor"] >= MIN_SCORE_EKSEKUSI else "⚪"
                 print(f"  {emoji} {symbol:12} "
                       f"Skor:{hasil['skor']:2} | "
-                      f"RSI:{hasil['rsi']:5.1f} | "
-                      f"Momentum:{hasil['momentum']:+5.1f}% | "
-                      f"Bayes:{hasil['bayes']:5.1f}%")
+                      f"MTF:{hasil['mtf']['summary']}")
                 hasil_scan.append(hasil)
         except Exception as e:
-            print(f"  ⚠️  Error scan {symbol}: {e}")
-            continue
-
+            print(f"  ⚠️  {symbol}: {e}")
     hasil_scan.sort(key=lambda x: x["skor"], reverse=True)
     return hasil_scan
 
-# ── FUNGSI: CEK SL/TP SEMUA POSISI ───────────
+# ── CEK SL/TP + TRAILING ──────────────────────
 def cek_semua_sl_tp():
     waktu = time.strftime("%Y-%m-%d %H:%M:%S")
-
     for symbol in list(semua_posisi.keys()):
         pos = semua_posisi[symbol]
         if not pos["aktif"]:
             continue
-
         try:
-            ticker = client.get_symbol_ticker(symbol=symbol)
-            harga  = float(ticker["price"])
+            harga = float(client.get_symbol_ticker(symbol=symbol)["price"])
         except Exception as e:
-            print(f"  ⚠️  Gagal ambil harga {symbol}: {e}")
+            print(f"  ⚠️  Gagal harga {symbol}: {e}")
             continue
 
         profit_pct = ((harga - pos["harga_beli"]) / pos["harga_beli"]) * 100
-        print(f"  📊 {symbol}: ${harga:,.4f} | P/L: {profit_pct:+.2f}%")
+        update_trailing_stop(symbol, harga)
+        trail = " 🔄TRAIL" if pos.get("trailing_aktif") else ""
+        print(f"  📊 {symbol}: ${harga:,.4f} | "
+              f"P/L:{profit_pct:+.2f}% | SL:${pos['stop_loss']:,.4f}{trail}")
 
         if harga >= pos["take_profit"]:
             print(f"  🎯 [{symbol}] TAKE PROFIT!")
             try:
                 client.order_market_sell(symbol=symbol, quantity=pos["qty"])
             except Exception as e:
-                print(f"  ⚠️  Gagal sell {symbol}: {e}")
-
-            simpan_transaksi(symbol, pos["harga_beli"],
-                             harga, pos["waktu_beli"], waktu, "TAKE_PROFIT")
+                print(f"  ⚠️  Gagal sell: {e}")
+            simpan_transaksi(symbol, pos["harga_beli"], harga,
+                             pos["waktu_beli"], waktu, "TAKE_PROFIT")
             kirim_telegram(
                 f"🎯 <b>TAKE PROFIT! - {symbol}</b>\n\n"
-                f"💰 Beli  : <b>${pos['harga_beli']:,.4f}</b>\n"
-                f"💰 Jual  : <b>${harga:,.4f}</b>\n"
+                f"💰 Beli : <b>${pos['harga_beli']:,.4f}</b>\n"
+                f"💰 Jual : <b>${harga:,.4f}</b>\n"
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n"
                 f"🕐 {waktu}"
             )
             semua_posisi[symbol]["aktif"] = False
 
         elif harga <= pos["stop_loss"]:
-            print(f"  🛑 [{symbol}] STOP LOSS!")
+            alasan = "TRAILING_STOP" if pos.get("trailing_aktif") else "STOP_LOSS"
+            emoji  = "🔄" if pos.get("trailing_aktif") else "🛑"
+            print(f"  {emoji} [{symbol}] {alasan}!")
             try:
                 client.order_market_sell(symbol=symbol, quantity=pos["qty"])
             except Exception as e:
-                print(f"  ⚠️  Gagal sell {symbol}: {e}")
-
-            simpan_transaksi(symbol, pos["harga_beli"],
-                             harga, pos["waktu_beli"], waktu, "STOP_LOSS")
+                print(f"  ⚠️  Gagal sell: {e}")
+            simpan_transaksi(symbol, pos["harga_beli"], harga,
+                             pos["waktu_beli"], waktu, alasan)
             kirim_telegram(
-                f"🛑 <b>STOP LOSS! - {symbol}</b>\n\n"
-                f"💰 Beli  : <b>${pos['harga_beli']:,.4f}</b>\n"
-                f"💰 Jual  : <b>${harga:,.4f}</b>\n"
-                f"📉 Loss  : <b>{profit_pct:.2f}%</b> ❌\n"
+                f"{emoji} <b>{alasan}! - {symbol}</b>\n\n"
+                f"💰 Beli : <b>${pos['harga_beli']:,.4f}</b>\n"
+                f"💰 Jual : <b>${harga:,.4f}</b>\n"
+                f"{'📈' if profit_pct >= 0 else '📉'} P/L: "
+                f"<b>{profit_pct:+.2f}%</b> "
+                f"{'✅' if profit_pct >= 0 else '❌'}\n"
                 f"🕐 {waktu}"
             )
             semua_posisi[symbol]["aktif"] = False
 
-# ── FUNGSI: HITUNG QTY ────────────────────────
+# ── HITUNG QTY ────────────────────────────────
 def hitung_qty(symbol, harga):
     qty = TRADE_USDT / harga
-    if harga > 1000:
-        qty = round(qty, 3)
-    elif harga > 1:
-        qty = round(qty, 2)
-    else:
-        qty = round(qty, 0)
-    return qty
+    if harga > 1000:   return round(qty, 3)
+    elif harga > 1:    return round(qty, 2)
+    else:              return round(qty, 0)
 
-# ── FUNGSI: BUKA POSISI ───────────────────────
+# ── BUKA POSISI ───────────────────────────────
 def buka_posisi(hasil):
     waktu  = time.strftime("%Y-%m-%d %H:%M:%S")
     symbol = hasil["symbol"]
@@ -614,145 +628,117 @@ def buka_posisi(hasil):
     sl_pct = ((harga - sl) / harga) * 100
     tp_pct = ((tp - harga) / harga) * 100
 
-    print(f"\n  🟢 [{symbol}] BUY! Skor:{hasil['skor']} | Qty:{qty}")
-
+    print(f"\n  🟢 [{symbol}] BUY! Skor:{hasil['skor']} Qty:{qty}")
     try:
         client.order_market_buy(symbol=symbol, quantity=qty)
     except Exception as e:
-        print(f"  ⚠️  Gagal buy {symbol}: {e}")
+        print(f"  ⚠️  Gagal buy: {e}")
         return
 
     semua_posisi[symbol] = {
-        "aktif"      : True,
-        "harga_beli" : harga,
-        "stop_loss"  : sl,
-        "take_profit": tp,
-        "waktu_beli" : waktu,
-        "qty"        : qty,
-        "atr"        : atr
+        "aktif": True, "harga_beli": harga,
+        "harga_tertinggi": harga, "stop_loss": sl,
+        "take_profit": tp, "waktu_beli": waktu,
+        "qty": qty, "atr": atr, "trailing_aktif": False,
     }
 
-    geo        = hasil.get("geo", {})
-    geo_sent   = geo.get("sentiment", "N/A")
-    geo_buy    = geo.get("skor_buy", 0)
-    geo_sell   = geo.get("skor_sell", 0)
-    geo_berita = geo.get("n_berita", 0)
-    detail_str = " | ".join(hasil["detail"])
+    geo    = hasil.get("geo", {})
+    mtf    = hasil.get("mtf", {})
+    detail = " | ".join(hasil["detail"])
 
     kirim_telegram(
         f"🟢 <b>ORDER BUY - {symbol}</b>\n"
         f"⭐ Skor    : <b>{hasil['skor']}</b>\n"
         f"🤖 ML      : {hasil['ml_pred']} ({hasil['ml_conf']:.0f}%)\n"
         f"🧠 Bayes   : {hasil['bayes']:.1f}%\n"
+        f"📊 MTF     : {mtf.get('summary','N/A')}\n"
         f"📈 Momentum: {hasil['momentum']:+.1f}%\n"
-        f"🌍 Geo     : {geo_sent} (+{geo_buy}/-{geo_sell}, {geo_berita} berita)\n\n"
+        f"🌍 Geo     : {geo.get('sentiment','N/A')}\n\n"
         f"💰 Harga : <b>${harga:,.4f}</b>\n"
         f"🔢 Qty   : {qty}\n"
         f"🛑 SL    : <b>${sl:,.4f}</b> (-{sl_pct:.1f}%)\n"
-        f"🎯 TP    : <b>${tp:,.4f}</b> (+{tp_pct:.1f}%)\n\n"
-        f"✅ {detail_str}\n\n"
-        f"🕐 {waktu}"
+        f"🎯 TP    : <b>${tp:,.4f}</b> (+{tp_pct:.1f}%)\n"
+        f"🔄 Trailing: aktif setelah +{TRAILING_AKTIVASI}%\n\n"
+        f"✅ {detail}\n🕐 {waktu}"
     )
 
-# ── FUNGSI: STATUS SEMUA POSISI ───────────────
+# ── STATUS POSISI ─────────────────────────────
 def print_status_posisi():
     aktif = [(s, p) for s, p in semua_posisi.items() if p["aktif"]]
     if not aktif:
         print("  📭 Tidak ada posisi aktif")
         return
-
-    print(f"  📊 Posisi aktif: {len(aktif)}/{MAX_POSISI}")
+    print(f"  📊 {len(aktif)}/{MAX_POSISI} posisi aktif")
     for symbol, pos in aktif:
         try:
-            ticker = client.get_symbol_ticker(symbol=symbol)
-            harga  = float(ticker["price"])
+            harga  = float(client.get_symbol_ticker(symbol=symbol)["price"])
             pl_pct = ((harga - pos["harga_beli"]) / pos["harga_beli"]) * 100
-            emoji  = "📈" if pl_pct >= 0 else "📉"
-            print(f"  {emoji} {symbol:12} "
-                  f"Beli:${pos['harga_beli']:,.4f} | "
-                  f"Skrg:${harga:,.4f} | "
-                  f"P/L:{pl_pct:+.2f}%")
+            trail  = " 🔄" if pos.get("trailing_aktif") else ""
+            print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:12} "
+                  f"${pos['harga_beli']:,.4f}→${harga:,.4f} "
+                  f"P/L:{pl_pct:+.2f}%{trail}")
         except:
             pass
 
-# ── FUNGSI: SATU SIKLUS TRADING ───────────────
+# ── SATU SIKLUS ───────────────────────────────
 def jalankan_siklus(siklus):
-    """Jalankan satu siklus penuh — dipisah agar mudah di-retry"""
     waktu = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}")
     print(f"⏰ {waktu} | Siklus #{siklus}")
     print(f"{'='*60}")
 
-    # Step 1: Cek SL/TP
-    print("\n📊 Cek posisi aktif:")
+    print("\n📊 Posisi aktif:")
     print_status_posisi()
     cek_semua_sl_tp()
 
-    # Step 2: Status geo
-    print("\n🌍 Kondisi geopolitik:")
+    print("\n🌍 Geopolitik:")
     print_geo_status()
 
-    # Step 3: Hitung posisi aktif
-    n_posisi_aktif = sum(1 for p in semua_posisi.values() if p["aktif"])
-    print(f"\n  Posisi aktif: {n_posisi_aktif}/{MAX_POSISI}")
+    n_aktif = sum(1 for p in semua_posisi.values() if p["aktif"])
+    print(f"\n  Posisi: {n_aktif}/{MAX_POSISI}")
 
-    # Step 4: Scan koin
-    if n_posisi_aktif < MAX_POSISI:
-        slot_tersisa = MAX_POSISI - n_posisi_aktif
-        print(f"  Slot tersisa: {slot_tersisa}")
-
+    if n_aktif < MAX_POSISI:
         hasil_scan = scan_semua_koin()
         kandidat   = [h for h in hasil_scan
-                      if h["skor"] >= MIN_SCORE_EKSEKUSI]
+                      if h["skor"] >= MIN_SCORE_EKSEKUSI
+                      and h["mtf"]["cukup_bullish"]]
 
         if kandidat:
-            print(f"\n🏆 Top Kandidat:")
+            print(f"\n🏆 Kandidat ({len(kandidat)}):")
             for i, k in enumerate(kandidat[:3], 1):
-                print(f"  {i}. {k['symbol']:12} "
-                      f"Skor:{k['skor']} | "
-                      f"RSI:{k['rsi']:.1f} | "
-                      f"Momentum:{k['momentum']:+.1f}%")
-
-            for kandidat_koin in kandidat[:slot_tersisa]:
-                buka_posisi(kandidat_koin)
-                n_posisi_aktif += 1
-                if n_posisi_aktif >= MAX_POSISI:
+                print(f"  {i}. {k['symbol']} "
+                      f"Skor:{k['skor']} "
+                      f"MTF:{k['mtf']['n_konfirmasi']}/3")
+            for k in kandidat[:MAX_POSISI - n_aktif]:
+                buka_posisi(k)
+                n_aktif += 1
+                if n_aktif >= MAX_POSISI:
                     break
         else:
-            print("\n  ⚪ Tidak ada koin dengan skor cukup")
+            print("\n  ⚪ Tidak ada kandidat memenuhi syarat MTF")
             if hasil_scan:
-                print(f"     Skor tertinggi: "
-                      f"{hasil_scan[0]['symbol']} = {hasil_scan[0]['skor']}")
+                t = hasil_scan[0]
+                print(f"     Terbaik: {t['symbol']} "
+                      f"Skor:{t['skor']} MTF:{t['mtf']['n_konfirmasi']}/3")
     else:
-        print(f"  ✋ Posisi penuh ({MAX_POSISI}/{MAX_POSISI})")
+        print(f"  ✋ Posisi penuh")
 
-# ── MAIN ──────────────────────────────────────
+# ── MAIN ──────────────════════════════════════
 print("=" * 60)
-print("   BINANCE TRADING BOT v9.2 - CLOUD EDITION")
-print(f"   Koin        : {', '.join([k.replace('USDT','') for k in KOIN_LIST])}")
-print(f"   Max Posisi  : {MAX_POSISI}")
-print(f"   Modal/Posisi: ${TRADE_USDT}")
-print(f"   Min Skor    : {MIN_SCORE_EKSEKUSI}")
-print(f"   Environment : {'Cloud ☁️' if os.environ.get('RAILWAY_ENVIRONMENT') else 'Local 💻'}")
+print("   BINANCE TRADING BOT v9.3 - CLOUD EDITION")
+print(f"   🔄 Trailing Stop : aktif setelah +{TRAILING_AKTIVASI}%")
+print(f"   📊 Multi TF      : 1H + 4H + 1D (min {TF_REQUIRED}/3)")
 print("=" * 60)
 
 ml_aktif = load_model()
-
-print("\n🌍 Cek kondisi geopolitik awal...")
 geo_awal = get_geo_cached()
-print(f"  Sentiment : {geo_awal['sentiment']}")
-print(f"  Berita    : {geo_awal['n_berita']} artikel")
 
 kirim_telegram(
-    "🚀 <b>Trading Bot v9.2 - Cloud Edition!</b>\n\n"
-    f"☁️ Deploy: {'Railway' if os.environ.get('RAILWAY_ENVIRONMENT') else 'Local'}\n"
-    f"🔍 Scan : {', '.join([k.replace('USDT','') for k in KOIN_LIST])}\n\n"
-    f"📊 Max posisi : {MAX_POSISI}\n"
-    f"💰 Modal/pos  : ${TRADE_USDT}\n"
-    f"🤖 ML         : {'✅' if ml_aktif else '⚠️'}\n"
-    f"🧠 Bayesian   : ✅\n"
-    f"🌍 Geo        : ✅ ({geo_awal['sentiment']}, {geo_awal['n_berita']} berita)\n"
-    f"🔄 Auto-reconnect: ✅\n"
+    "🚀 <b>Trading Bot v9.3 - Upgrade!</b>\n\n"
+    f"🔄 Trailing Stop  : aktif setelah +{TRAILING_AKTIVASI}%\n"
+    f"📊 Multi Timeframe: 1H + 4H + 1D (min {TF_REQUIRED}/3)\n"
+    f"🌍 Geo : {geo_awal['sentiment']} ({geo_awal['n_berita']} berita)\n"
+    f"🤖 ML  : {'✅' if ml_aktif else '⚠️'}\n"
     "📌 Status: ✅ Berjalan 24/7"
 )
 
@@ -761,31 +747,26 @@ cek_saldo()
 print("=" * 60)
 
 siklus = 0
-
 while bot_running:
     siklus += 1
     try:
         jalankan_siklus(siklus)
-        reconnect_count = 0  # Reset jika siklus sukses
-        print(f"\n⏳ Menunggu {SCAN_INTERVAL//60} menit...")
+        reconnect_count = 0
+        print(f"\n⏳ Tunggu {SCAN_INTERVAL//60} menit...")
         time.sleep(SCAN_INTERVAL)
 
     except (BinanceAPIException, ConnectionError,
             requests.exceptions.ConnectionError,
             requests.exceptions.Timeout) as e:
-        # Error koneksi → reconnect
         print(f"\n📡 Koneksi error: {e}")
         reconnect_client()
 
     except Exception as e:
-        # Error tak terduga → log + kirim Telegram + lanjut
-        tb = traceback.format_exc()
-        print(f"\n⚠️  Error tak terduga di siklus #{siklus}:")
-        print(tb)
+        print(f"\n⚠️  Error siklus #{siklus}: {e}")
         kirim_telegram(
-            f"⚠️ <b>Bot Error - Siklus #{siklus}</b>\n\n"
-            f"<code>{str(e)[:200]}</code>\n\n"
-            f"🔄 Bot tetap berjalan...\n"
+            f"⚠️ <b>Bot Error #{siklus}</b>\n\n"
+            f"<code>{str(e)[:200]}</code>\n"
+            f"🔄 Tetap berjalan...\n"
             f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        time.sleep(30)  # Tunggu sebentar lalu lanjut
+        time.sleep(30)
