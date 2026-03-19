@@ -27,6 +27,10 @@ from risk_manager import (
     validasi_entry,
     print_kondisi_market
 )
+from telegram_bot import mulai_polling, is_paused
+from whale_tracker import get_whale_score
+from multi_strategy import get_params, auto_detect_mode, set_mode
+from backtesting import jalankan_backtest
 import pandas as pd
 import numpy as np
 import requests
@@ -908,6 +912,10 @@ ml_aktif = load_model()
 geo_awal = get_geo_cached()
 btc_awal = get_btc_kondisi(client)
 ses_awal = cek_session_aktif(client)
+
+# Mulai Telegram Command Handler
+ctx = {"posisi_spot": posisi_spot, "posisi_futures": posisi_futures, "client": client}
+mulai_polling(TG_TOKEN, TG_CHAT_ID, ctx)
 
 # Load daftar koin pertama kali
 print("\n🔄 Loading daftar koin...")
