@@ -73,6 +73,11 @@ KOIN_PRIORITAS = [
     "UNIUSDT", "AAVEUSDT",
     # Meme
     "PEPEUSDT", "SHIBUSDT", "WIFUSDT",
+    # ── TAMBAHAN BARU ──
+    # Hyperliquid
+    "HYPEUSDT",
+    # Komoditas (tokenized gold - spot)
+    "XAUTUSDT",   # Tether Gold - 1 token = 1 troy oz emas fisik
 ]
 
 # Koin yang di-blacklist (stablecoin, leverage token, dll)
@@ -82,6 +87,13 @@ KOIN_BLACKLIST = {
     # Leverage token
     "BTCUPUSDT", "BTCDOWNUSDT", "ETHUPUSDT", "ETHDOWNUSDT",
     "BNBUPUSDT", "BNBDOWNUSDT",
+}
+
+# Komoditas TradFi Futures Binance (XAUUSDT, XAGUSDT)
+# Emas & Perak diperdagangkan di Futures tab, bukan Spot
+KOIN_KOMODITAS_FUTURES = {
+    "XAUUSDT": {"nama": "Gold (Emas)",    "tab": "TradFi"},
+    "XAGUSDT": {"nama": "Silver (Perak)", "tab": "TradFi"},
 }
 
 TOP_N_VOLUME   = 50    # Ambil top 50 by volume
@@ -907,6 +919,10 @@ kirim_telegram(
     f"📋 Prioritas  : {len(KOIN_PRIORITAS)} koin\n"
     f"📊 Total scan : {len(koin_awal)} koin\n"
     f"🔄 Refresh    : Setiap 15 menit\n\n"
+    f"✨ Koin baru  :\n"
+    f"   ⚡ HYPE (Hyperliquid)\n"
+    f"   🥇 XAUT (Tether Gold - spot)\n"
+    f"   🥇 XAU/XAGUSDT (Emas/Perak - futures)\n\n"
     f"🛡️ Dynamic SL     : ✅\n"
     f"₿  BTC Filter    : ✅ ({btc_awal['kondisi']})\n"
     f"🚪 Early Exit    : ✅\n"
