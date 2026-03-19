@@ -1,7 +1,6 @@
 # ============================================
-# BINANCE TRADING BOT v9.7 - RISK MANAGER
-# Upgrade: Dynamic SL + BTC Filter +
-#          Early Exit + Session Filter
+# BINANCE TRADING BOT v9.8 - DYNAMIC SCANNER
+# Auto-scan Top 50 Koin by Volume
 # ============================================
 
 from binance.client import Client
@@ -55,13 +54,40 @@ OKX_PASS     = os.environ.get("OKX_PASSPHRASE", "")
 CB_KEY       = os.environ.get("COINBASE_API_KEY", "")
 CB_SECRET    = os.environ.get("COINBASE_API_SECRET", "")
 
-# ── DAFTAR KOIN ───────────────────────────────
-KOIN_LIST = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT",
-    "SOLUSDT", "ADAUSDT", "XRPUSDT",
-    "DOGEUSDT", "AVAXUSDT", "DOTUSDT",
-    "LINKUSDT"
+# ══════════════════════════════════════════════
+# KONFIGURASI DYNAMIC SCANNER
+# ══════════════════════════════════════════════
+
+# Koin prioritas — selalu discan meski tidak di top volume
+KOIN_PRIORITAS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+    "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT",
+    "LINKUSDT", "DOGEUSDT",
+    # Layer 1
+    "NEARUSDT", "APTUSDT", "SUIUSDT", "TONUSDT",
+    # Layer 2
+    "ARBUSDT", "OPUSDT", "MATICUSDT",
+    # AI Crypto
+    "FETUSDT", "RENDERUSDT", "WLDUSDT",
+    # DeFi
+    "UNIUSDT", "AAVEUSDT",
+    # Meme
+    "PEPEUSDT", "SHIBUSDT", "WIFUSDT",
 ]
+
+# Koin yang di-blacklist (stablecoin, leverage token, dll)
+KOIN_BLACKLIST = {
+    "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "USDTUSDT",
+    "FDUSDUSDT", "DAIUSDT", "EURUSDT",
+    # Leverage token
+    "BTCUPUSDT", "BTCDOWNUSDT", "ETHUPUSDT", "ETHDOWNUSDT",
+    "BNBUPUSDT", "BNBDOWNUSDT",
+}
+
+TOP_N_VOLUME   = 50    # Ambil top 50 by volume
+MIN_HARGA      = 0.00001  # Filter harga minimum
+MIN_VOLUME_USD = 5_000_000  # Minimum volume $5 juta per 24 jam
+REFRESH_KOIN   = 3     # Refresh daftar koin setiap 3 siklus
 
 # ── KONFIGURASI TRADING ───────────────────────
 MAX_POSISI_SPOT    = 3
@@ -73,14 +99,15 @@ TF_REQUIRED        = 2
 SCAN_INTERVAL      = 300
 
 # ── STATE ─────────────────────────────────────
-posisi_spot     = {}
-onchain_cache   = {"data": None, "waktu": 0}
-geo_cache       = {"data": None, "waktu": 0}
-bot_running     = True
-reconnect_count = 0
-MAX_RECONNECT   = 10
-RECONNECT_DELAY = 30
-last_entry_time = {}   # Throttle entry per koin
+posisi_spot      = {}
+onchain_cache    = {"data": None, "waktu": 0}
+geo_cache        = {"data": None, "waktu": 0}
+koin_cache       = {"data": [], "waktu": 0}   # Cache daftar koin
+bot_running      = True
+reconnect_count  = 0
+MAX_RECONNECT    = 10
+RECONNECT_DELAY  = 30
+last_entry_time  = {}
 
 # ── INIT ──────────────────────────────────────
 def buat_client():
@@ -164,6 +191,127 @@ def load_model():
     except:
         print("  ⚠️  Model ML belum ada!")
         return False
+
+# ══════════════════════════════════════════════
+# DYNAMIC COIN SCANNER
+# ══════════════════════════════════════════════
+
+def get_top_koin_by_volume():
+    """
+    Ambil top N koin USDT berdasarkan volume 24 jam dari Binance.
+    Gabungkan dengan koin prioritas.
+    Cache selama 15 menit.
+    """
+    global koin_cache
+    sekarang = time.time()
+
+    # Gunakan cache jika masih fresh (15 menit)
+    if (koin_cache["data"] and
+            sekarang - koin_cache["waktu"] < 900):
+        return koin_cache["data"]
+
+    print("\n  🔄 Refresh daftar koin dari Binance...")
+
+    try:
+        # Ambil semua ticker 24h
+        tickers = client.get_ticker()
+
+        # Filter hanya pair USDT
+        usdt_pairs = []
+        for t in tickers:
+            symbol = t["symbol"]
+
+            # Harus pair USDT
+            if not symbol.endswith("USDT"):
+                continue
+
+            # Blacklist check
+            if symbol in KOIN_BLACKLIST:
+                continue
+
+            # Filter leverage token (biasanya ada UP/DOWN/BULL/BEAR)
+            base = symbol.replace("USDT", "")
+            if any(x in base for x in ["UP", "DOWN", "BULL", "BEAR", "3L", "3S"]):
+                continue
+
+            harga      = float(t.get("lastPrice", 0))
+            volume_usd = float(t.get("quoteVolume", 0))
+
+            # Filter harga dan volume minimum
+            if harga < MIN_HARGA:
+                continue
+            if volume_usd < MIN_VOLUME_USD:
+                continue
+
+            usdt_pairs.append({
+                "symbol"    : symbol,
+                "volume_usd": volume_usd,
+                "harga"     : harga,
+                "change_pct": float(t.get("priceChangePercent", 0))
+            })
+
+        # Sort by volume descending
+        usdt_pairs.sort(key=lambda x: x["volume_usd"], reverse=True)
+
+        # Ambil top N
+        top_by_volume = [p["symbol"] for p in usdt_pairs[:TOP_N_VOLUME]]
+
+        # Gabungkan dengan prioritas (tanpa duplikat)
+        koin_list = list(dict.fromkeys(KOIN_PRIORITAS + top_by_volume))
+
+        # Simpan cache
+        koin_cache["data"]  = koin_list
+        koin_cache["waktu"] = sekarang
+
+        # Top 5 by volume untuk display
+        top5 = usdt_pairs[:5]
+        print(f"  ✅ {len(koin_list)} koin siap discan")
+        print(f"  📊 Top volume: " + " | ".join([
+            f"{p['symbol'].replace('USDT','')} ${p['volume_usd']/1e6:.0f}M"
+            for p in top5
+        ]))
+
+        return koin_list
+
+    except Exception as e:
+        print(f"  ⚠️  Gagal refresh koin: {e}")
+        # Fallback ke koin prioritas
+        return KOIN_PRIORITAS
+
+def get_hot_movers():
+    """
+    Deteksi koin yang sedang bergerak besar (>5% dalam 24 jam).
+    Untuk momentum trading.
+    """
+    try:
+        tickers = client.get_ticker()
+        movers  = []
+
+        for t in tickers:
+            symbol = t["symbol"]
+            if not symbol.endswith("USDT"):
+                continue
+            if symbol in KOIN_BLACKLIST:
+                continue
+
+            change = float(t.get("priceChangePercent", 0))
+            vol    = float(t.get("quoteVolume", 0))
+
+            # Koin yang naik atau turun signifikan dengan volume tinggi
+            if abs(change) >= 5 and vol >= MIN_VOLUME_USD:
+                movers.append({
+                    "symbol": symbol,
+                    "change": change,
+                    "volume": vol
+                })
+
+        # Sort by absolute change
+        movers.sort(key=lambda x: abs(x["change"]), reverse=True)
+        return movers[:10]  # Top 10 movers
+
+    except Exception as e:
+        print(f"  ⚠️  Hot movers error: {e}")
+        return []
 
 # ── FUNGSI: AMBIL DATA ────────────────────────
 def get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=150):
@@ -352,10 +500,7 @@ def get_geo_cached():
                 }
     return geo_cache["data"]
 
-# ══════════════════════════════════════════════
-# HITUNG SKOR KOIN
-# ══════════════════════════════════════════════
-
+# ── HITUNG SKOR KOIN ──────────────────────────
 def hitung_skor_koin(symbol):
     df = get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR)
     if df is None: return None
@@ -436,7 +581,6 @@ def hitung_skor_koin(symbol):
     if mx["arbitrase"]["ada_peluang"]:
         detail.append(f"🔄Arbi:{mx['arbitrase']['net_profit_pct']:+.3f}%")
 
-    # ── BTC Market Filter tambahan ke skor ──
     btc = get_btc_kondisi(client)
     if btc["skor_market"] <= -2:
         skor -= 2; detail.append(f"₿DUMP{btc['btc_change_1h']:+.1f}%")
@@ -453,15 +597,18 @@ def hitung_skor_koin(symbol):
         "geo": geo, "mtf": mtf, "ob": ob, "mx": mx, "btc": btc
     }
 
-# ── SCAN SEMUA KOIN ───────────────────────────
-def scan_semua_koin():
-    print(f"\n🔍 Scanning {len(KOIN_LIST)} koin (v9.7 Risk Manager)...")
+# ── SCAN SEMUA KOIN (DYNAMIC) ─────────────────
+def scan_semua_koin(koin_list):
+    """Scan semua koin dalam daftar dinamis"""
+    print(f"\n🔍 Scanning {len(koin_list)} koin (Dynamic Top Volume)...")
     hasil_scan = []
-    for symbol in KOIN_LIST:
+    skip_count = 0
+
+    for symbol in koin_list:
         spot_aktif    = symbol in posisi_spot and posisi_spot[symbol]["aktif"]
         futures_aktif = symbol in posisi_futures and posisi_futures[symbol].get("aktif")
         if spot_aktif or futures_aktif:
-            print(f"  ⏭️  {symbol:12} - {'SPOT' if spot_aktif else 'FUT'} aktif")
+            skip_count += 1
             continue
         try:
             hasil = hitung_skor_koin(symbol)
@@ -473,19 +620,23 @@ def scan_semua_koin():
                 emoji = "🔥" if hasil["skor"] >= MIN_SCORE_SPOT else (
                         "📉" if hasil["skor"] <= -2 else "⚪")
                 btc_em = "🔴" if not hasil["btc"]["boleh_entry"] else ""
-                print(f"  {emoji} {symbol:12} "
+                print(f"  {emoji} {symbol:14} "
                       f"Skor:{hasil['skor']:+3} | "
-                      f"MTF:{hasil['mtf']['n_konfirmasi']}/3 | "
-                      f"BTC:{hasil['btc']['btc_change_1h']:+.1f}%{btc_em} | "
-                      f"FUT:{mode_fut}")
+                      f"RSI:{hasil['rsi']:5.1f} | "
+                      f"Mom:{hasil['momentum']:+5.1f}% | "
+                      f"MTF:{hasil['mtf']['n_konfirmasi']}/3{btc_em}")
                 hasil["mode_futures"] = mode_fut
                 hasil_scan.append(hasil)
         except Exception as e:
             print(f"  ⚠️  {symbol}: {e}")
-    hasil_scan.sort(key=lambda x: abs(x["skor"]), reverse=True)
+
+    if skip_count:
+        print(f"  ⏭️  {skip_count} koin skip (posisi aktif)")
+
+    hasil_scan.sort(key=lambda x: x["skor"], reverse=True)
     return hasil_scan
 
-# ── CEK SL/TP + EARLY EXIT (SPOT) ────────────
+# ── CEK SL/TP + EARLY EXIT ────────────────────
 def cek_semua_sl_tp_spot():
     waktu = time.strftime("%Y-%m-%d %H:%M:%S")
     for symbol in list(posisi_spot.keys()):
@@ -498,13 +649,12 @@ def cek_semua_sl_tp_spot():
 
         profit_pct = ((harga - pos["harga_beli"]) / pos["harga_beli"]) * 100
         update_trailing_spot(symbol, harga)
-        trail = " 🔄" if pos.get("trailing_aktif") else ""
-        dyn   = f"[{pos.get('sl_kondisi','?')}]" if pos.get("sl_kondisi") else ""
+        trail  = " 🔄" if pos.get("trailing_aktif") else ""
+        sl_mode = f"[{pos.get('sl_kondisi','?')}]"
         print(f"  💰 {symbol}: ${harga:,.4f} | "
-              f"P/L:{profit_pct:+.2f}% | "
-              f"SL:${pos['stop_loss']:,.4f}{dyn}{trail}")
+              f"P/L:{profit_pct:+.2f}%{trail} {sl_mode}")
 
-        # ── EARLY EXIT CHECK ──────────────────
+        # Early Exit
         early = cek_early_exit(symbol, pos, client)
         if early["exit_sekarang"] and profit_pct > 0:
             print(f"  🚪 [{symbol}] EARLY EXIT! {early['alasan']}")
@@ -517,12 +667,10 @@ def cek_semua_sl_tp_spot():
                 f"💰 Entry : ${pos['harga_beli']:,.4f}\n"
                 f"💰 Exit  : ${harga:,.4f}\n"
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n"
-                f"📋 Alasan: {early['alasan']}\n"
-                f"🕐 {waktu}"
+                f"📋 Alasan: {early['alasan']}\n🕐 {waktu}"
             )
             posisi_spot[symbol]["aktif"] = False
             continue
-        # ─────────────────────────────────────
 
         if harga >= pos["take_profit"]:
             try: client.order_market_sell(symbol=symbol, quantity=pos["qty"])
@@ -549,18 +697,17 @@ def cek_semua_sl_tp_spot():
                 f"💰 Entry: ${pos['harga_beli']:,.4f}\n"
                 f"💰 Exit : ${harga:,.4f}\n"
                 f"📉 P/L  : <b>{profit_pct:.2f}%</b> ❌\n"
-                f"📊 SL mode: {pos.get('sl_kondisi','NORMAL')}\n🕐 {waktu}"
+                f"📊 SL   : {pos.get('sl_kondisi','NORMAL')}\n🕐 {waktu}"
             )
             posisi_spot[symbol]["aktif"] = False
 
-# ── HITUNG QTY SPOT ───────────────────────────
+# ── HITUNG QTY & BUKA POSISI SPOT ────────────
 def hitung_qty_spot(symbol, harga):
     qty = TRADE_USDT_SPOT / harga
     if harga > 1000:   return round(qty, 3)
     elif harga > 1:    return round(qty, 2)
     else:              return round(qty, 0)
 
-# ── BUKA POSISI SPOT (dengan Dynamic SL) ─────
 def buka_posisi_spot(hasil):
     waktu  = time.strftime("%Y-%m-%d %H:%M:%S")
     symbol = hasil["symbol"]
@@ -568,28 +715,21 @@ def buka_posisi_spot(hasil):
     atr    = hasil["atr"]
     qty    = hitung_qty_spot(symbol, harga)
 
-    # ── DYNAMIC SL ──
     dyn_sl = hitung_dynamic_sl(harga, atr, hasil.get("df"))
-    sl     = dyn_sl["sl"]
-    tp     = dyn_sl["tp"]
-    sl_pct = dyn_sl["sl_pct"]
-    tp_pct = dyn_sl["tp_pct"]
+    sl     = dyn_sl["sl"]; tp = dyn_sl["tp"]
+    sl_pct = dyn_sl["sl_pct"]; tp_pct = dyn_sl["tp_pct"]
 
     print(f"\n  💰 [{symbol}] SPOT BUY! Skor:{hasil['skor']} "
           f"Qty:{qty} SL:{dyn_sl['kondisi']}(x{dyn_sl['multiplier']})")
-
     try: client.order_market_buy(symbol=symbol, quantity=qty)
     except Exception as e: print(f"  ⚠️  Gagal buy: {e}"); return
 
-    # Throttle: catat waktu entry terakhir
     last_entry_time[symbol] = time.time()
-
     posisi_spot[symbol] = {
         "aktif": True, "harga_beli": harga, "harga_tertinggi": harga,
         "stop_loss": sl, "take_profit": tp, "waktu_beli": waktu,
         "qty": qty, "atr": atr, "trailing_aktif": False,
-        "sl_kondisi": dyn_sl["kondisi"],   # ← Simpan kondisi volatilitas
-        "sl_multiplier": dyn_sl["multiplier"]
+        "sl_kondisi": dyn_sl["kondisi"], "sl_multiplier": dyn_sl["multiplier"]
     }
 
     mtf = hasil.get("mtf", {}); ob = hasil.get("ob", {})
@@ -626,24 +766,33 @@ def print_status_spot():
             harga  = float(client.get_symbol_ticker(symbol=symbol)["price"])
             pl_pct = ((harga - pos["harga_beli"]) / pos["harga_beli"]) * 100
             trail  = " 🔄" if pos.get("trailing_aktif") else ""
-            sl_mode = f"[{pos.get('sl_kondisi','?')}]"
-            print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:12} "
+            print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:14} "
                   f"${pos['harga_beli']:,.4f}→${harga:,.4f} "
-                  f"P/L:{pl_pct:+.2f}%{trail} {sl_mode}")
+                  f"P/L:{pl_pct:+.2f}%{trail}")
         except: pass
 
 # ── SATU SIKLUS ───────────────────────────────
 def jalankan_siklus(siklus):
     waktu = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*60}")
-    print(f"⏰ {waktu} | Siklus #{siklus} | 🛡️ RISK MANAGER")
-    print(f"{'='*60}")
+    print(f"\n{'='*65}")
+    print(f"⏰ {waktu} | Siklus #{siklus} | 🔍 DYNAMIC SCANNER")
+    print(f"{'='*65}")
 
-    # ── Kondisi market ──
+    # Kondisi market
     print("\n📊 Kondisi Market:")
     print_kondisi_market(client)
 
-    # ── Cek posisi aktif ──
+    # Hot movers setiap 5 siklus
+    if siklus % 5 == 1:
+        movers = get_hot_movers()
+        if movers:
+            top3 = movers[:3]
+            print(f"\n🔥 Hot Movers: " + " | ".join([
+                f"{m['symbol'].replace('USDT','')} {m['change']:+.1f}%"
+                for m in top3
+            ]))
+
+    # Cek posisi aktif
     print("\n💰 Posisi SPOT:")
     print_status_spot()
     cek_semua_sl_tp_spot()
@@ -652,23 +801,7 @@ def jalankan_siklus(siklus):
     print_status_futures()
     cek_posisi_futures(client, kirim_telegram, simpan_transaksi)
 
-    # ── Arbitrase setiap 3 siklus ──
-    if siklus % 3 == 0:
-        print("\n🔄 Cek Arbitrase:")
-        for symbol in KOIN_LIST[:3]:  # Cek 3 koin teratas saja
-            try:
-                arbi = scan_arbitrase(client, symbol)
-                if arbi["ada_peluang"]:
-                    print(f"  🔄 {symbol}: {arbi['detail']}")
-                    kirim_telegram(
-                        f"🔄 <b>ARBITRASE - {symbol}</b>\n"
-                        f"📉 Beli: {arbi['exchange_beli'].upper()} ${arbi['harga_beli']:,.4f}\n"
-                        f"📈 Jual: {arbi['exchange_jual'].upper()} ${arbi['harga_jual']:,.4f}\n"
-                        f"✅ Net: <b>{arbi['net_profit_pct']:+.3f}%</b>"
-                    )
-            except: pass
-
-    # ── Hitung slot ──
+    # Hitung slot
     n_spot    = sum(1 for p in posisi_spot.values() if p["aktif"])
     n_futures = sum(1 for p in posisi_futures.values() if p.get("aktif"))
     slot_spot    = MAX_POSISI_SPOT - n_spot
@@ -680,8 +813,26 @@ def jalankan_siklus(siklus):
     if slot_spot <= 0 and slot_futures <= 0:
         print("  ✋ Semua slot penuh!"); return
 
-    # ── Scan koin ──
-    hasil_scan = scan_semua_koin()
+    # ── DYNAMIC COIN LIST ──
+    koin_list = get_top_koin_by_volume()
+    print(f"\n  📋 Daftar scan: {len(koin_list)} koin")
+
+    # Scan semua koin
+    hasil_scan = scan_semua_koin(koin_list)
+
+    # Filter kandidat
+    kandidat_terbaik = [
+        h for h in hasil_scan
+        if h["skor"] >= MIN_SCORE_SPOT
+    ]
+
+    if kandidat_terbaik:
+        print(f"\n🏆 Top Kandidat ({len(kandidat_terbaik)} koin lolos skor):")
+        for i, k in enumerate(kandidat_terbaik[:5], 1):
+            print(f"  {i}. {k['symbol']:14} "
+                  f"Skor:{k['skor']:+3} | "
+                  f"MTF:{k['mtf']['n_konfirmasi']}/3 | "
+                  f"Mom:{k['momentum']:+.1f}%")
 
     for hasil in hasil_scan:
         if slot_spot <= 0 and slot_futures <= 0: break
@@ -697,23 +848,18 @@ def jalankan_siklus(siklus):
            (symbol in posisi_futures and posisi_futures[symbol].get("aktif")):
             continue
 
-        # Throttle: jangan entry koin yang sama dalam 1 jam
+        # Throttle
         last_entry = last_entry_time.get(symbol, 0)
         if time.time() - last_entry < 3600:
-            print(f"  ⏳ [{symbol}] Throttle: entry terlalu dekat")
             continue
 
-        # ── VALIDASI ENTRY (Risk Manager) ──
+        # Validasi Risk Manager
         validasi = validasi_entry(symbol, skor, client, hasil.get("df"))
-
         if not validasi["boleh"]:
             print(f"  🚫 [{symbol}] BLOCKED: {' | '.join(validasi['alasan'])}")
             continue
 
-        if validasi["warning"]:
-            print(f"  ⚠️  [{symbol}] Warning: {' | '.join(validasi['warning'])}")
-
-        # ── KEPUTUSAN HYBRID ──
+        # Keputusan Hybrid
         if mode_fut == "LONG" and slot_futures > 0:
             print(f"\n  ⚡ [{symbol}] → FUTURES LONG (Skor:{skor})")
             sukses = buka_long(client, symbol, harga, atr,
@@ -738,29 +884,34 @@ def jalankan_siklus(siklus):
             slot_spot -= 1; n_spot += 1
 
 # ── MAIN ──────────────════════════════════════
-print("=" * 60)
-print("   BINANCE TRADING BOT v9.7 - RISK MANAGER")
-print(f"   🛡️ Dynamic SL    : ATR x1.2~2.5 (otomatis)")
-print(f"   ₿  BTC Filter   : Block saat BTC dump >1.5%/jam")
-print(f"   🚪 Early Exit   : Exit sebelum kena SL")
-print(f"   🕐 Session Filter: Asia + London + US session")
-print(f"   ⏳ Entry Throttle: Max 1x per koin per jam")
-print("=" * 60)
+print("=" * 65)
+print("   BINANCE TRADING BOT v9.8 - DYNAMIC SCANNER")
+print(f"   🔍 Mode      : Auto Top {TOP_N_VOLUME} Koin by Volume")
+print(f"   📋 Prioritas : {len(KOIN_PRIORITAS)} koin tetap")
+print(f"   🔄 Refresh   : Setiap 15 menit")
+print(f"   🛡️ Risk Mgr  : Dynamic SL + BTC Filter + Early Exit")
+print("=" * 65)
 
 ml_aktif = load_model()
 geo_awal = get_geo_cached()
 btc_awal = get_btc_kondisi(client)
 ses_awal = cek_session_aktif(client)
 
+# Load daftar koin pertama kali
+print("\n🔄 Loading daftar koin...")
+koin_awal = get_top_koin_by_volume()
+
 kirim_telegram(
-    "🚀 <b>Trading Bot v9.7 - Risk Manager!</b>\n\n"
-    f"🛡️ Dynamic SL     : ✅ (ATR x1.2~2.5)\n"
+    "🚀 <b>Trading Bot v9.8 - Dynamic Scanner!</b>\n\n"
+    f"🔍 <b>Auto-scan Top {TOP_N_VOLUME} by Volume</b>\n"
+    f"📋 Prioritas  : {len(KOIN_PRIORITAS)} koin\n"
+    f"📊 Total scan : {len(koin_awal)} koin\n"
+    f"🔄 Refresh    : Setiap 15 menit\n\n"
+    f"🛡️ Dynamic SL     : ✅\n"
     f"₿  BTC Filter    : ✅ ({btc_awal['kondisi']})\n"
     f"🚪 Early Exit    : ✅\n"
-    f"🕐 Session Filter: ✅ ({ses_awal['sesi']}, {ses_awal['jam_wib']})\n"
-    f"⏳ Entry Throttle: ✅ (1x/jam/koin)\n\n"
+    f"🕐 Session Filter: ✅ ({ses_awal['sesi']})\n"
     f"🌐 Multi Exchange : ✅\n"
-    f"⚡ Futures {LEVERAGE}x      : ✅\n"
     f"🌍 Geo            : {geo_awal['sentiment']}\n"
     f"🤖 ML             : {'✅' if ml_aktif else '⚠️'}\n"
     "📌 Status: ✅ Berjalan 24/7"
@@ -768,7 +919,7 @@ kirim_telegram(
 
 print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
-print("=" * 60)
+print("=" * 65)
 
 siklus = 0
 while bot_running:
