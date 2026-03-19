@@ -1,29 +1,33 @@
 {
-  "harga": 73812.0,
-  "sinyal": "HOLD",
-  "skor_buy": 2,
-  "skor_sell": 2,
+  "harga": 70778.67,
+  "sinyal": "BUY",
+  "skor_buy": 8,
+  "skor_sell": 3,
   "detail_buy": [
-    "\ud83d\udfe1 Fear&Greed: 26 (Fear) - FEAR",
-    "\ud83d\udfe2 BTC Dominance: 56.66% (BTC kuat)"
+    "\u2705 RSI oversold (32.8)",
+    "\u2705 Bullish Divergence",
+    "\ud83d\udfe2 Fear&Greed: 23 (Extreme Fear) - EXTREME FEAR",
+    "\ud83d\udfe2 BTC Dominance: 56.32% (BTC kuat)",
+    "\ud83e\udde0 Bayes P(BUY)=82.54% \ud83d\udd25 SANGAT TINGGI"
   ],
   "detail_sell": [
-    "\ud83e\udd16 ML prediksi HOLD (97.9%)"
+    "\u2705 Ichimoku bearish",
+    "\ud83e\udd16 ML prediksi HOLD (85.6%)"
   ],
   "ml_pred": "HOLD",
-  "ml_conf": 97.9,
-  "bayes_buy": 46.18,
-  "bayes_conf": "RENDAH",
+  "ml_conf": 85.6,
+  "bayes_buy": 82.54,
+  "bayes_conf": "SANGAT TINGGI",
   "posisi_aktif": true,
-  "harga_beli": 74228.67,
-  "stop_loss": 71890.14321428571,
-  "take_profit": 78905.72357142856,
-  "pl_pct": -0.56,
-  "saldo_usdt": 8871.33556,
-  "saldo_btc": 1.003,
-  "fear_greed": 26,
-  "fear_label": "Fear",
+  "harga_beli": 71301.09,
+  "stop_loss": 70035.2325,
+  "take_profit": 73832.805,
+  "pl_pct": -0.73,
+  "saldo_usdt": 0.0,
+  "saldo_btc": 0.0,
+  "fear_greed": 23,
+  "fear_label": "Extreme Fear",
   "funding_rate": 0,
   "ls_ratio": 1,
-  "waktu": "2026-03-18 14:28:23"
+  "waktu": "2026-03-19 11:33:21"
 }

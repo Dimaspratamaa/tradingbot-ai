@@ -114,5 +114,148 @@
     "waktu_beli": "2026-03-18 10:27:09",
     "waktu_jual": "2026-03-18 14:23:23",
     "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "harga_beli": 9.85,
+    "harga_jual": 9.38,
+    "profit_pct": -4.7716,
+    "waktu_beli": "2026-03-18 13:30:13",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "ADAUSDT",
+    "harga_beli": 0.2874,
+    "harga_jual": 0.2755,
+    "profit_pct": -4.1406,
+    "waktu_beli": "2026-03-18 14:30:05",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "ADAUSDT",
+    "harga_beli": 0.2875,
+    "harga_jual": 0.2755,
+    "profit_pct": -4.1739,
+    "waktu_beli": "2026-03-18 14:36:21",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "harga_beli": 9.89,
+    "harga_jual": 9.38,
+    "profit_pct": -5.1567,
+    "waktu_beli": "2026-03-18 11:00:24",
+    "waktu_jual": "2026-03-18 21:09:09",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "harga_beli": 9.82,
+    "harga_jual": 9.38,
+    "profit_pct": -4.4807,
+    "waktu_beli": "2026-03-18 15:00:09",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "ADAUSDT",
+    "harga_beli": 0.2896,
+    "harga_jual": 0.2757,
+    "profit_pct": -4.7997,
+    "waktu_beli": "2026-03-18 15:22:16",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "harga_beli": 9.82,
+    "harga_jual": 9.38,
+    "profit_pct": -4.4807,
+    "waktu_beli": "2026-03-18 15:00:04",
+    "waktu_jual": "2026-03-18 21:09:10",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "harga_beli": 10.29,
+    "harga_jual": 9.78,
+    "profit_pct": -4.9563,
+    "waktu_beli": "2026-03-17 22:00:19",
+    "waktu_jual": "2026-03-18 21:09:12",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "harga_beli": 74049.91,
+    "harga_jual": 72141.99,
+    "profit_pct": -2.5765,
+    "waktu_beli": "2026-03-18 12:41:29",
+    "waktu_jual": "2026-03-18 21:09:09",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "harga_beli": 0.1001,
+    "harga_jual": 0.09572,
+    "profit_pct": -4.3756,
+    "waktu_beli": "2026-03-18 11:34:22",
+    "waktu_jual": "2026-03-18 21:09:12",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "harga_beli": 72134.92,
+    "harga_jual": 71030.57,
+    "profit_pct": -1.531,
+    "waktu_beli": "2026-03-18 21:09:54",
+    "waktu_jual": "2026-03-19 03:02:13",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "harga_beli": 74376.95,
+    "harga_jual": 71030.57,
+    "profit_pct": -4.4992,
+    "waktu_beli": "2026-03-17 22:00:17",
+    "waktu_jual": "2026-03-19 03:02:13",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "harga_beli": 72134.92,
+    "harga_jual": 71030.57,
+    "profit_pct": -1.531,
+    "waktu_beli": "2026-03-18 21:09:58",
+    "waktu_jual": "2026-03-19 03:02:13",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "harga_beli": 74228.67,
+    "harga_jual": 71030.57,
+    "profit_pct": -4.3084,
+    "waktu_beli": "2026-03-17 21:53:40",
+    "waktu_jual": "2026-03-19 03:02:21",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "harga_beli": 9.38,
+    "harga_jual": 9.22,
+    "profit_pct": -1.7058,
+    "waktu_beli": "2026-03-18 21:09:49",
+    "waktu_jual": "2026-03-19 04:03:10",
+    "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "BTCUSDT",
+    "harga_beli": 72141.99,
+    "harga_jual": 70874.34,
+    "profit_pct": -1.7572,
+    "waktu_beli": "2026-03-18 21:09:46",
+    "waktu_jual": "2026-03-19 11:12:52",
+    "alasan": "STOP_LOSS"
   }
 ]

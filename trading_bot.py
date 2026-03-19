@@ -1,6 +1,7 @@
 # ============================================
-# BINANCE TRADING BOT v9.5 - HYBRID EDITION
-# Spot + Futures (Long & Short) 5x Leverage
+# BINANCE TRADING BOT v9.6 - MULTI EXCHANGE
+# Spot + Futures + Bybit + OKX + Coinbase
+# Arbitrase Detection + Cross OB Analysis
 # ============================================
 
 from binance.client import Client
@@ -13,6 +14,11 @@ from futures_engine import (
     buka_long, buka_short, cek_posisi_futures,
     print_status_futures, tentukan_mode_futures,
     posisi_futures, LEVERAGE, MAX_POSISI_FUTURES
+)
+from multi_exchange import (
+    analisis_multi_exchange,
+    cek_saldo_semua_exchange,
+    scan_arbitrase
 )
 import pandas as pd
 import numpy as np
@@ -33,6 +39,15 @@ API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ
 TG_TOKEN   = os.environ.get("TG_TOKEN",           "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID",         "8604266478")
 
+# ── MULTI EXCHANGE API (dari env variables) ───
+BYBIT_KEY    = os.environ.get("BYBIT_API_KEY", "")
+BYBIT_SECRET = os.environ.get("BYBIT_API_SECRET", "")
+OKX_KEY      = os.environ.get("OKX_API_KEY", "")
+OKX_SECRET   = os.environ.get("OKX_API_SECRET", "")
+OKX_PASS     = os.environ.get("OKX_PASSPHRASE", "")
+CB_KEY       = os.environ.get("COINBASE_API_KEY", "")
+CB_SECRET    = os.environ.get("COINBASE_API_SECRET", "")
+
 # ── DAFTAR KOIN ───────────────────────────────
 KOIN_LIST = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT",
@@ -45,9 +60,6 @@ KOIN_LIST = [
 MAX_POSISI_SPOT    = 3
 MIN_SCORE_SPOT     = 6
 TRADE_USDT_SPOT    = 100.0
-
-# ── KONFIGURASI FUTURES (dari futures_engine) ─
-# MIN_SKOR_LONG = 8, MIN_SKOR_SHORT = 7, LEVERAGE = 5x
 
 # ── TRAILING & TIMEFRAME ──────────────────────
 TRAILING_AKTIVASI  = 1.5
@@ -137,29 +149,8 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
 
 # ── FUNGSI: CEK SALDO ─────────────────────────
 def cek_saldo():
-    try:
-        # Spot
-        akun_spot  = client.get_account()
-        saldo_spot = {a["asset"]: float(a["free"])
-                      for a in akun_spot["balances"] if float(a["free"]) > 0}
-        usdt_spot  = saldo_spot.get("USDT", 0)
-
-        # Futures
-        try:
-            akun_fut  = client.futures_account()
-            usdt_fut  = next(
-                (float(a["availableBalance"])
-                 for a in akun_fut["assets"] if a["asset"] == "USDT"), 0
-            )
-        except:
-            usdt_fut = 0
-
-        print(f"  💰 Spot USDT    : ${usdt_spot:,.2f}")
-        print(f"  ⚡ Futures USDT : ${usdt_fut:,.2f}")
-        return {"spot": usdt_spot, "futures": usdt_fut}
-    except Exception as e:
-        print(f"  ⚠️  Gagal cek saldo: {e}")
-        return {"spot": 0, "futures": 0}
+    # Tampilkan saldo semua exchange sekaligus
+    cek_saldo_semua_exchange(client)
 
 # ── FUNGSI: LOAD MODEL ML ─────────────────────
 model_ml = scaler_ml = features_ml = None
@@ -324,11 +315,13 @@ def prediksi_ml(df):
         d['macd']        = ema12-ema26
         d['macd_signal'] = d['macd'].ewm(span=9,adjust=False).mean()
         d['macd_hist']   = d['macd']-d['macd_signal']
-        sma20 = d['close'].rolling(20).mean(); std20 = d['close'].rolling(20).std()
+        sma20 = d['close'].rolling(20).mean()
+        std20 = d['close'].rolling(20).std()
         bb_upper = sma20+(std20*2); bb_lower = sma20-(std20*2)
         d['bb_width'] = (bb_upper-bb_lower)/sma20
         d['bb_pos']   = (d['close']-bb_lower)/(bb_upper-bb_lower)
-        tr = pd.concat([d['high']-d['low'],(d['high']-d['close'].shift()).abs(),
+        tr = pd.concat([d['high']-d['low'],
+                        (d['high']-d['close'].shift()).abs(),
                         (d['low']-d['close'].shift()).abs()],axis=1).max(axis=1)
         d['atr']         = tr.rolling(14).mean()
         d['atr_pct']     = d['atr']/d['close']*100
@@ -384,7 +377,7 @@ def get_geo_cached():
     return geo_cache["data"]
 
 # ══════════════════════════════════════════════
-# HITUNG SKOR KOIN (Hybrid)
+# HITUNG SKOR KOIN (v9.6 Multi Exchange)
 # ══════════════════════════════════════════════
 
 def hitung_skor_koin(symbol):
@@ -408,11 +401,11 @@ def hitung_skor_koin(symbol):
     if ind["bull_div"]:    skor += 1; detail.append("BullDiv✓")
     if ind["momentum"] > 3: skor += 1; detail.append(f"Mom+{ind['momentum']:.1f}%")
 
-    # Sinyal bearish (untuk SHORT)
-    if ind["rsi"] > 70:    skor -= 1; detail.append(f"RSI OB({ind['rsi']:.1f})")
-    if ind["macd_down"]:   skor -= 1; detail.append("MACD↓")
-    if ind["bb_atas"]:     skor -= 1; detail.append("BB↑")
-    if ind["bear_div"]:    skor -= 1; detail.append("BearDiv⚠️")
+    # Sinyal bearish
+    if ind["rsi"] > 70:      skor -= 1; detail.append(f"RSI OB({ind['rsi']:.1f})")
+    if ind["macd_down"]:     skor -= 1; detail.append("MACD↓")
+    if ind["bb_atas"]:       skor -= 1; detail.append("BB↑")
+    if ind["bear_div"]:      skor -= 1; detail.append("BearDiv⚠️")
     if ind["momentum"] < -3: skor -= 1; detail.append(f"Mom{ind['momentum']:.1f}%")
 
     if ml_pred == "BUY" and ml_conf >= 60:
@@ -437,9 +430,9 @@ def hitung_skor_koin(symbol):
         skor += 1; detail.append(f"Bayes{bayes_hasil['prob_buy']}%✅")
 
     # Geo
-    if geo["skor_buy"] >= 2:   skor += geo["skor_buy"]; detail.append(f"🌍+{geo['skor_buy']}")
-    elif geo["skor_buy"] == 1: skor += 1; detail.append("🌍+1")
-    if geo["skor_sell"] >= 3:  skor -= 4; detail.append("🔴GeoBlock")
+    if geo["skor_buy"] >= 2:    skor += geo["skor_buy"]; detail.append(f"🌍+{geo['skor_buy']}")
+    elif geo["skor_buy"] == 1:  skor += 1; detail.append("🌍+1")
+    if geo["skor_sell"] >= 3:   skor -= 4; detail.append("🔴GeoBlock")
     elif geo["skor_sell"] == 2: skor -= 2; detail.append("🟠Geo-2")
     elif geo["skor_sell"] == 1: skor -= 1; detail.append("🟡Geo-1")
 
@@ -449,7 +442,7 @@ def hitung_skor_koin(symbol):
     elif mtf["cukup_bullish"]: skor += 1; detail.append(f"📊MTF{mtf['n_konfirmasi']}/3✅")
     else:                       skor -= 1; detail.append(f"📊MTF{mtf['n_konfirmasi']}/3❌")
 
-    # Order Book
+    # Order Book (Binance)
     ob = analisis_orderbook(client, symbol)
     if ob["block_entry"]:
         skor -= 5; detail.append("🚫OB:MANIP!")
@@ -459,12 +452,37 @@ def hitung_skor_koin(symbol):
             + f"\n⚠️ Entry diblokir!\n🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
     else:
-        if ob["skor_buy"] >= 3:   skor += 3; detail.append(f"📗OB+{ob['skor_buy']}🔥")
-        elif ob["skor_buy"] >= 1: skor += ob["skor_buy"]; detail.append(f"📗OB+{ob['skor_buy']}")
-        if ob["skor_sell"] >= 2:  skor -= ob["skor_sell"]; detail.append(f"📕OB-{ob['skor_sell']}")
+        if ob["skor_buy"] >= 3:    skor += 3; detail.append(f"📗OB+{ob['skor_buy']}🔥")
+        elif ob["skor_buy"] >= 1:  skor += ob["skor_buy"]; detail.append(f"📗OB+{ob['skor_buy']}")
+        if ob["skor_sell"] >= 2:   skor -= ob["skor_sell"]; detail.append(f"📕OB-{ob['skor_sell']}")
         elif ob["skor_sell"] == 1: skor -= 1; detail.append("📕OB-1")
     if ob["iceberg"]["iceberg_side"] == "BUY":  detail.append("🧊BUY✅")
     if ob["iceberg"]["iceberg_side"] == "SELL": skor -= 1; detail.append("🧊SELL⚠️")
+
+    # ══════════════════════════════════════════
+    # ── MULTI EXCHANGE ANALYSIS ───────────────
+    # ══════════════════════════════════════════
+    mx = analisis_multi_exchange(client, symbol)
+
+    # Cross OB konsensus dari semua exchange
+    if mx["skor_buy"] >= 3:
+        skor += 3; detail.append(f"🌐MX+{mx['skor_buy']}🔥")
+    elif mx["skor_buy"] >= 1:
+        skor += mx["skor_buy"]; detail.append(f"🌐MX+{mx['skor_buy']}")
+
+    if mx["skor_sell"] >= 3:
+        skor -= 3; detail.append(f"🌐MX-{mx['skor_sell']}🔴")
+    elif mx["skor_sell"] >= 1:
+        skor -= mx["skor_sell"]; detail.append(f"🌐MX-{mx['skor_sell']}")
+
+    # Info arbitrase
+    if mx["arbitrase"]["ada_peluang"]:
+        detail.append(
+            f"🔄Arbi:{mx['arbitrase']['net_profit_pct']:+.3f}%"
+            f"({mx['arbitrase']['exchange_beli']}→"
+            f"{mx['arbitrase']['exchange_jual']})"
+        )
+    # ══════════════════════════════════════════
 
     return {
         "symbol": symbol, "skor": skor,
@@ -474,14 +492,14 @@ def hitung_skor_koin(symbol):
         "bayes": bayes_hasil["prob_buy"],
         "detail": detail, "ind": ind,
         "geo": geo, "mtf": mtf, "ob": ob,
+        "mx": mx,    # ← Data multi exchange
     }
 
 # ── SCAN SEMUA KOIN ───────────────────────────
 def scan_semua_koin():
-    print(f"\n🔍 Scanning {len(KOIN_LIST)} koin (Hybrid Mode)...")
+    print(f"\n🔍 Scanning {len(KOIN_LIST)} koin (Multi Exchange)...")
     hasil_scan = []
     for symbol in KOIN_LIST:
-        # Skip jika ada posisi spot ATAU futures aktif
         spot_aktif    = symbol in posisi_spot and posisi_spot[symbol]["aktif"]
         futures_aktif = symbol in posisi_futures and posisi_futures[symbol].get("aktif")
         if spot_aktif or futures_aktif:
@@ -491,23 +509,52 @@ def scan_semua_koin():
         try:
             hasil = hitung_skor_koin(symbol)
             if hasil:
-                # Tentukan mode yang akan dipakai
                 mode_fut = tentukan_mode_futures(
                     hasil["skor"], hasil["ind"],
                     hasil["geo"], hasil["mtf"], hasil["ob"]
                 )
+                mx    = hasil["mx"]
+                arbi  = "🔄" if mx["arbitrase"]["ada_peluang"] else ""
                 emoji = "🔥" if hasil["skor"] >= MIN_SCORE_SPOT else (
                         "📉" if hasil["skor"] <= -2 else "⚪")
                 print(f"  {emoji} {symbol:12} "
                       f"Skor:{hasil['skor']:+3} | "
                       f"MTF:{hasil['mtf']['n_konfirmasi']}/3 | "
-                      f"FUT:{mode_fut}")
+                      f"MX:{mx['cross_ob']['sinyal'][:8]} | "
+                      f"FUT:{mode_fut}{arbi}")
                 hasil["mode_futures"] = mode_fut
                 hasil_scan.append(hasil)
         except Exception as e:
             print(f"  ⚠️  {symbol}: {e}")
     hasil_scan.sort(key=lambda x: abs(x["skor"]), reverse=True)
     return hasil_scan
+
+# ── SCAN ARBITRASE ────────────────────────────
+def cek_arbitrase_semua_koin():
+    """Scan peluang arbitrase di semua koin"""
+    print("\n🔄 Cek Arbitrase:")
+    ada_peluang = False
+    for symbol in KOIN_LIST:
+        try:
+            arbi = scan_arbitrase(client, symbol)
+            if arbi["ada_peluang"]:
+                ada_peluang = True
+                print(f"  🔄 {symbol}: {arbi['detail']}")
+                kirim_telegram(
+                    f"🔄 <b>PELUANG ARBITRASE!</b>\n\n"
+                    f"💎 Koin    : <b>{symbol}</b>\n"
+                    f"📉 Beli di : <b>{arbi['exchange_beli'].upper()}</b> "
+                    f"${arbi['harga_beli']:,.4f}\n"
+                    f"📈 Jual di : <b>{arbi['exchange_jual'].upper()}</b> "
+                    f"${arbi['harga_jual']:,.4f}\n"
+                    f"💰 Spread  : {arbi['spread_pct']:.3f}%\n"
+                    f"✅ Net Profit: <b>{arbi['net_profit_pct']:+.3f}%</b>\n"
+                    f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        except Exception as e:
+            pass
+    if not ada_peluang:
+        print("  ⚪ Tidak ada peluang arbitrase saat ini")
 
 # ── CEK SL/TP SPOT ────────────────────────────
 def cek_semua_sl_tp_spot():
@@ -582,7 +629,15 @@ def buka_posisi_spot(hasil):
     }
 
     mtf = hasil.get("mtf", {}); ob = hasil.get("ob", {})
-    geo = hasil.get("geo", {})
+    geo = hasil.get("geo", {}); mx = hasil.get("mx", {})
+
+    # Harga dari semua exchange
+    harga_mx = ""
+    if mx.get("all_prices"):
+        harga_mx = " | ".join([
+            f"{ex.upper()[:3]}:${d['price']:,.2f}"
+            for ex, d in mx["all_prices"].get("per_exchange", {}).items()
+        ])
 
     kirim_telegram(
         f"💰 <b>SPOT BUY - {symbol}</b>\n"
@@ -590,7 +645,9 @@ def buka_posisi_spot(hasil):
         f"🤖 ML      : {hasil['ml_pred']} ({hasil['ml_conf']:.0f}%)\n"
         f"📊 MTF     : {mtf.get('summary','N/A')}\n"
         f"📗 OB      : {ob.get('depth',{}).get('sinyal','N/A')}\n"
-        f"🌍 Geo     : {geo.get('sentiment','N/A')}\n\n"
+        f"🌐 Multi-Ex: {mx.get('cross_ob',{}).get('sinyal','N/A')}\n"
+        + (f"💱 Harga   : {harga_mx}\n" if harga_mx else "")
+        + f"🌍 Geo     : {geo.get('sentiment','N/A')}\n\n"
         f"💰 Entry : <b>${harga:,.4f}</b>\n"
         f"🔢 Qty   : {qty}\n"
         f"🛑 SL    : <b>${sl:,.4f}</b> (-{sl_pct:.1f}%)\n"
@@ -617,13 +674,13 @@ def print_status_spot():
         except: pass
 
 # ══════════════════════════════════════════════
-# SATU SIKLUS HYBRID
+# SATU SIKLUS HYBRID MULTI EXCHANGE
 # ══════════════════════════════════════════════
 
 def jalankan_siklus(siklus):
     waktu = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}")
-    print(f"⏰ {waktu} | Siklus #{siklus} | 🔀 HYBRID MODE")
+    print(f"⏰ {waktu} | Siklus #{siklus} | 🌐 MULTI EXCHANGE")
     print(f"{'='*60}")
 
     # ── Cek posisi aktif ──
@@ -635,7 +692,11 @@ def jalankan_siklus(siklus):
     print_status_futures()
     cek_posisi_futures(client, kirim_telegram, simpan_transaksi)
 
-    # ── Hitung slot tersisa ──
+    # ── Cek arbitrase setiap 3 siklus ──
+    if siklus % 3 == 0:
+        cek_arbitrase_semua_koin()
+
+    # ── Hitung slot ──
     n_spot    = sum(1 for p in posisi_spot.values() if p["aktif"])
     n_futures = sum(1 for p in posisi_futures.values() if p.get("aktif"))
 
@@ -663,13 +724,11 @@ def jalankan_siklus(siklus):
         atr        = hasil["atr"]
         detail_str = " | ".join(hasil["detail"])
 
-        # ── Cek apakah sudah ada posisi ──
         if (symbol in posisi_spot and posisi_spot[symbol]["aktif"]) or \
            (symbol in posisi_futures and posisi_futures[symbol].get("aktif")):
             continue
 
-        # ══ KEPUTUSAN HYBRID ══════════════════
-        # Prioritas 1: Futures LONG jika skor sangat tinggi
+        # ══ KEPUTUSAN HYBRID ══
         if mode_fut == "LONG" and slot_futures > 0:
             print(f"\n  ⚡ [{symbol}] → FUTURES LONG (Skor:{skor})")
             sukses = buka_long(
@@ -677,10 +736,8 @@ def jalankan_siklus(siklus):
                 skor, detail_str, kirim_telegram
             )
             if sukses:
-                slot_futures -= 1
-                n_futures    += 1
+                slot_futures -= 1; n_futures += 1
 
-        # Prioritas 2: Futures SHORT jika bearish kuat
         elif mode_fut == "SHORT" and slot_futures > 0:
             print(f"\n  📉 [{symbol}] → FUTURES SHORT (Skor:{skor})")
             sukses = buka_short(
@@ -688,45 +745,51 @@ def jalankan_siklus(siklus):
                 skor, detail_str, kirim_telegram
             )
             if sukses:
-                slot_futures -= 1
-                n_futures    += 1
+                slot_futures -= 1; n_futures += 1
 
-        # Prioritas 3: Spot jika skor cukup tapi tidak memenuhi futures
         elif skor >= MIN_SCORE_SPOT and slot_spot > 0 \
              and hasil["mtf"]["cukup_bullish"] \
              and not hasil["ob"]["block_entry"]:
             print(f"\n  💰 [{symbol}] → SPOT BUY (Skor:{skor})")
             buka_posisi_spot(hasil)
-            slot_spot -= 1
-            n_spot    += 1
+            slot_spot -= 1; n_spot += 1
 
 # ── MAIN ──────────────════════════════════════
 print("=" * 60)
-print("   BINANCE TRADING BOT v9.5 - HYBRID EDITION")
-print(f"   💰 Spot    : Max {MAX_POSISI_SPOT} posisi, ${TRADE_USDT_SPOT}/pos")
-print(f"   ⚡ Futures : Max {MAX_POSISI_FUTURES} posisi, {LEVERAGE}x leverage")
-print(f"   📊 Multi TF: 1H + 4H + 1D")
-print(f"   📗 Order Book: Depth + Spoof + Iceberg")
+print("   BINANCE TRADING BOT v9.6 - MULTI EXCHANGE")
+print(f"   🌐 Exchange : Binance + Bybit + OKX + Coinbase")
+print(f"   💰 Spot     : Max {MAX_POSISI_SPOT} posisi, ${TRADE_USDT_SPOT}/pos")
+print(f"   ⚡ Futures  : Max {MAX_POSISI_FUTURES} posisi, {LEVERAGE}x leverage")
+print(f"   🔄 Arbitrase: Auto-detect setiap 3 siklus")
 print("=" * 60)
 
 ml_aktif = load_model()
 geo_awal = get_geo_cached()
 
+# Cek exchange yang tersedia
+exchange_aktif = ["Binance ✅"]
+if BYBIT_KEY:    exchange_aktif.append("Bybit ✅")
+else:            exchange_aktif.append("Bybit ⚠️(no key)")
+if OKX_KEY:      exchange_aktif.append("OKX ✅")
+else:            exchange_aktif.append("OKX ⚠️(no key)")
+if CB_KEY:       exchange_aktif.append("Coinbase ✅")
+else:            exchange_aktif.append("Coinbase ⚠️(no key)")
+
 kirim_telegram(
-    "🚀 <b>Trading Bot v9.5 - HYBRID!</b>\n\n"
-    f"💰 <b>SPOT</b>    : Max {MAX_POSISI_SPOT} posisi\n"
-    f"⚡ <b>FUTURES</b> : {LEVERAGE}x leverage, Max {MAX_POSISI_FUTURES} posisi\n"
-    f"   └ LONG  : skor ≥ 8 + trend bullish\n"
-    f"   └ SHORT : skor ≤ -2 atau geo/OB bearish\n\n"
-    f"📊 Multi TF (1H+4H+1D) : ✅\n"
-    f"📗 Order Book AI        : ✅\n"
-    f"🔄 Trailing Stop        : ✅\n"
-    f"🌍 Geo                  : {geo_awal['sentiment']}\n"
-    f"🤖 ML                   : {'✅' if ml_aktif else '⚠️'}\n"
+    "🚀 <b>Trading Bot v9.6 - MULTI EXCHANGE!</b>\n\n"
+    f"🌐 <b>Exchange:</b>\n"
+    + "\n".join([f"   {ex}" for ex in exchange_aktif])
+    + f"\n\n"
+    f"🔄 Arbitrase Scanner : ✅\n"
+    f"📊 Cross OB Analysis : ✅\n"
+    f"⚡ Futures {LEVERAGE}x        : ✅\n"
+    f"📊 Multi TF (1H+4H+1D): ✅\n"
+    f"🌍 Geo               : {geo_awal['sentiment']}\n"
+    f"🤖 ML                : {'✅' if ml_aktif else '⚠️'}\n"
     "📌 Status: ✅ Berjalan 24/7"
 )
 
-print("\n💰 Saldo:")
+print("\n💰 Saldo semua exchange:")
 cek_saldo()
 print("=" * 60)
 
