@@ -14,8 +14,8 @@ from datetime import datetime
 
 # ── KONFIGURASI API ───────────────────────────
 NEWS_API_KEY  = "bd6cd1c660d142a69b57fd2ca87436b5"
-FINNHUB_KEY   = "d6ts24pr01qhkb45d920d6ts24pr01qhkb45d92g" 
-NEWSDATA_KEY  = "pub_1047f4b52e224d68a50874bb740bdcf6"   
+FINNHUB_KEY   = "d6ts24pr01qhkb45d920d6ts24pr01qhkb45d92g"
+NEWSDATA_KEY  = "pub_1047f4b52e224d68a50874bb740bdcf6"
 
 # ── CACHE ─────────────────────────────────────
 _cache = {"data": None, "waktu": 0, "ttl": 600}
@@ -340,10 +340,23 @@ def get_geo_score():
     elif rata <= -0.8: skor_sell = 2
     elif rata <= -0.3: skor_sell = 1
 
-    # Alert
+    # Alert — hanya untuk berita yang BENAR-BENAR impactful
+    # Threshold dinaikkan 10→15, dan hanya untuk berita crypto/macro relevan
+    ALERT_THRESHOLD = 15
+    KATA_RELEVAN_ALERT = [
+        "bitcoin", "crypto", "btc", "ethereum", "market crash",
+        "federal reserve", "fed rate", "war", "sanctions", "ban crypto",
+        "sec", "regulation", "interest rate", "recession", "inflation"
+    ]
+
     alert = False; alert_pesan = ""
     for b in sorted(scored, key=lambda x: abs(x["skor_final"]), reverse=True):
-        if abs(b["skor_final"]) >= 10:
+        if abs(b["skor_final"]) >= ALERT_THRESHOLD:
+            # Pastikan berita benar-benar relevan dengan market crypto/macro
+            teks_cek = (b["judul"] + " " + b.get("desc","")).lower()
+            is_relevan = any(k in teks_cek for k in KATA_RELEVAN_ALERT)
+            if not is_relevan:
+                continue  # Skip berita tidak relevan meski skor tinggi
             alert = True
             emoji = "🔴" if b["skor_final"] < 0 else "🟢"
             alert_pesan = (

@@ -498,9 +498,13 @@ def hitung_skor_koin(symbol):
 # ══════════════════════════════════════════════
 
 def scan_satu_koin(symbol):
-    """Scan satu koin dengan timeout"""
+    """Scan satu koin dengan timeout - dengan guard symbol key"""
     try:
-        return hitung_skor_koin(symbol)
+        hasil = hitung_skor_koin(symbol)
+        # Pastikan hasil punya key 'symbol'
+        if hasil and "symbol" not in hasil:
+            hasil["symbol"] = symbol
+        return hasil
     except Exception as e:
         return None
 

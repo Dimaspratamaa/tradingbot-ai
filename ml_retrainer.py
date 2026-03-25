@@ -170,29 +170,43 @@ def retrain_model(client, kirim_telegram):
     Simpan model baru jika performance lebih baik.
     """
     print("\n🧠 Memulai proses retrain ML...")
-    kirim_telegram(
-        "🧠 <b>Auto Retrain ML dimulai!</b>\n\n"
-        "📊 Memproses riwayat trade...\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
 
     # Buat dataset
     dataset = buat_dataset_retrain(client)
     if dataset is None:
-        kirim_telegram("⚠️ <b>Retrain gagal</b>: Data tidak cukup")
+        # Silent - sudah dihandle di cek_jadwal_retrain
         return False
 
     X, y = dataset
+
+    # ── Validasi class balance sebelum training ──
+    n_profit = int(sum(y))
+    n_loss   = len(y) - n_profit
+    print(f"  📊 Dataset: {len(y)} sampel | Profit:{n_profit} Loss:{n_loss}")
+
+    if n_profit < 5 or n_loss < 5:
+        print(f"  ⚠️  Class tidak seimbang (profit:{n_profit}, loss:{n_loss}), retrain ditunda")
+        return False  # Silent, tidak spam Telegram
+
+    kirim_telegram(
+        "🧠 <b>Auto Retrain ML dimulai!</b>\n\n"
+        f"📊 Dataset : {len(y)} trade\n"
+        f"  ✅ Profit: {n_profit} | ❌ Loss: {n_loss}\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
     try:
         from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
         from sklearn.preprocessing import StandardScaler
         from sklearn.model_selection import cross_val_score, train_test_split
-        from sklearn.metrics import accuracy_score, classification_report
+        from sklearn.metrics import accuracy_score
 
-        # Split data
+        # Split data dengan stratify untuk jaga balance
+        min_class = min(n_profit, n_loss)
+        test_size = max(0.2, 2 / min_class) if min_class > 2 else 0.3
+
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
+            X, y, test_size=test_size, random_state=42, stratify=y
         )
 
         # Scale fitur

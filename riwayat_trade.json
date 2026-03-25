@@ -257,5 +257,23 @@
     "waktu_beli": "2026-03-18 21:09:46",
     "waktu_jual": "2026-03-19 11:12:52",
     "alasan": "STOP_LOSS"
+  },
+  {
+    "symbol": "WIFUSDT",
+    "harga_beli": 0.2,
+    "harga_jual": 0.196,
+    "profit_pct": -2.0,
+    "waktu_beli": "2026-03-25 20:41:02",
+    "waktu_jual": "2026-03-25 23:40:02",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "WIFUSDT",
+    "harga_beli": 0.201,
+    "harga_jual": 0.196,
+    "profit_pct": -2.4876,
+    "waktu_beli": "2026-03-25 20:16:44",
+    "waktu_jual": "2026-03-25 23:42:36",
+    "alasan": "SPOT_SL"
   }
 ]
