@@ -13,8 +13,29 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 RETRAIN_INTERVAL_HARI = 7     # Retrain setiap 7 hari
-MIN_TRADE_RETRAIN     = 20    # Minimal 20 trade untuk retrain
+MIN_TRADE_RETRAIN     = 30    # Minimal 30 trade (naikkan agar lebih stabil)
+RETRAIN_STATE_FILE    = "retrain_state.json"
 _last_retrain = {"tanggal": None, "waktu": 0}
+
+def _load_retrain_state():
+    """Load state dari file agar persist antar restart Railway"""
+    global _last_retrain
+    try:
+        if os.path.exists(RETRAIN_STATE_FILE):
+            with open(RETRAIN_STATE_FILE, "r") as f:
+                _last_retrain = json.load(f)
+    except:
+        pass
+
+def _save_retrain_state():
+    """Simpan state ke file"""
+    try:
+        with open(RETRAIN_STATE_FILE, "w") as f:
+            json.dump(_last_retrain, f)
+    except:
+        pass
+
+_load_retrain_state()  # Load otomatis saat import
 
 # ══════════════════════════════════════════════
 # BUAT DATASET DARI RIWAYAT TRADE
@@ -37,7 +58,7 @@ def buat_dataset_retrain(client, riwayat_file="riwayat_trade.json"):
 
     if len(riwayat) < MIN_TRADE_RETRAIN:
         print(f"  ⚠️  Data kurang ({len(riwayat)} < {MIN_TRADE_RETRAIN})")
-        return None
+        return None  # Silent, tidak kirim ke Telegram
 
     print(f"  📊 Memproses {len(riwayat)} trade untuk retrain...")
 
@@ -278,19 +299,54 @@ def cek_jadwal_retrain(client, kirim_telegram):
     """
     Cek apakah sudah waktunya retrain.
     Dipanggil di setiap siklus bot.
+
+    PERBAIKAN v10.1:
+    - State disimpan ke file (persist antar Railway restart)
+    - Cek data dulu sebelum notif ke Telegram
+    - Tidak spam jika data belum cukup
     """
     sekarang     = time.time()
     tanggal_hari = datetime.now().strftime("%Y-%m-%d")
 
-    # Retrain jika: sudah 7 hari sejak retrain terakhir
+    # Jangan retrain jika sudah retrain hari ini
+    if _last_retrain["tanggal"] == tanggal_hari:
+        return False
+
+    # Cek interval 7 hari (gunakan waktu dari file, bukan memory)
     sudah_waktunya = (
-        _last_retrain["tanggal"] is None or
+        _last_retrain["waktu"] == 0 or
         sekarang - _last_retrain["waktu"] > RETRAIN_INTERVAL_HARI * 86400
     )
 
-    if sudah_waktunya and _last_retrain["tanggal"] != tanggal_hari:
-        print(f"\n🧠 Waktunya retrain ML (interval {RETRAIN_INTERVAL_HARI} hari)!")
-        retrain_model(client, kirim_telegram)
-        return True
+    if not sudah_waktunya:
+        return False
 
-    return False
+    # ── Cek data dulu SEBELUM notif ke Telegram ──
+    n_trade = 0
+    if os.path.exists("riwayat_trade.json"):
+        try:
+            with open("riwayat_trade.json", "r") as f:
+                riwayat = json.load(f)
+            n_trade = len(riwayat)
+        except:
+            pass
+
+    if n_trade < MIN_TRADE_RETRAIN:
+        # Simpan tanggal agar tidak coba lagi hari ini
+        # tapi TIDAK kirim notif ke Telegram (tidak spam)
+        _last_retrain["tanggal"] = tanggal_hari
+        _last_retrain["waktu"]   = sekarang
+        _save_retrain_state()
+        print(f"  ⏳ Retrain ditunda: data {n_trade}/{MIN_TRADE_RETRAIN} trade")
+        return False
+
+    # Data cukup — jalankan retrain
+    print(f"\n🧠 Waktunya retrain ML! ({n_trade} trade tersedia)")
+    sukses = retrain_model(client, kirim_telegram)
+
+    # Simpan state ke file
+    _last_retrain["tanggal"] = tanggal_hari
+    _last_retrain["waktu"]   = sekarang
+    _save_retrain_state()
+
+    return sukses
