@@ -28,7 +28,19 @@ from risk_manager import (
 )
 from sentiment_analyzer import get_market_sentiment
 from portfolio_tracker import cek_jadwal_laporan
-from ml_retrainer import cek_jadwal_retrain
+from ml_retrainer import cek_jadwal_retrain as _cek_retrain_internal
+
+def cek_jadwal_retrain(client, kirim_telegram):
+    """
+    Wrapper retrain - hanya aktif jika ada cukup data.
+    Tidak akan pernah spam Telegram.
+    """
+    try:
+        return _cek_retrain_internal(client, kirim_telegram)
+    except Exception as e:
+        # Tangkap semua error retrain DISINI, tidak dikirim ke Telegram
+        print(f"  ⚠️  Retrain error (silent): {e}")
+        return False
 from pyramiding import (
     cek_semua_pyramid, reset_pyramid, get_pyramid_info,
     PYRAMID_PROFIT_TRIGGER, PYRAMID_MAX_LEVEL
