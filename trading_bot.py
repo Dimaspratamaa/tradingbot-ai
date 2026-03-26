@@ -1,4 +1,3 @@
-
 # ============================================
 # BINANCE TRADING BOT v10.1 - OPTIMIZED
 # Perbaikan:
@@ -30,6 +29,9 @@ from risk_manager import (
 from sentiment_analyzer import get_market_sentiment
 from portfolio_tracker import cek_jadwal_laporan
 from ml_retrainer import cek_jadwal_retrain as _cek_retrain_internal
+from macro_analyzer import get_macro_score
+from market_depth import get_depth_score
+from onchain_pro import get_onchain_pro_score
 
 def cek_jadwal_retrain(client, kirim_telegram):
     """
@@ -126,6 +128,7 @@ onchain_cache    = {"data": None, "waktu": 0}
 geo_cache        = {"data": None, "waktu": 0}
 koin_cache       = {"data": [], "waktu": 0}
 sentiment_cache  = {"data": None, "waktu": 0}
+macro_cache      = {"data": None, "waktu": 0}  # Cache makro 1 jam
 bot_running      = True
 reconnect_count  = 0
 MAX_RECONNECT    = 10
@@ -422,6 +425,23 @@ def get_sentiment_cached():
                 sentiment_cache["data"]={"skor_buy":0,"skor_sell":0,"sentiment":"NEUTRAL","summary":"N/A"}
     return sentiment_cache["data"]
 
+def get_macro_cached():
+    """Cache data makro 1 jam — data makro tidak berubah cepat"""
+    global macro_cache
+    sekarang = time.time()
+    if macro_cache["data"] is None or sekarang - macro_cache["waktu"] > 3600:
+        try:
+            macro_cache["data"]  = get_macro_score()
+            macro_cache["waktu"] = sekarang
+        except Exception as e:
+            print(f"  ⚠️  Macro cache error: {e}")
+            if macro_cache["data"] is None:
+                macro_cache["data"] = {
+                    "skor_buy": 0, "skor_sell": 0,
+                    "sentimen": "MACRO_NETRAL", "detail": []
+                }
+    return macro_cache["data"]
+
 # ══════════════════════════════════════════════
 # HITUNG SKOR KOIN v10.1
 # ══════════════════════════════════════════════
@@ -505,11 +525,60 @@ def hitung_skor_koin(symbol):
     elif sent["skor_buy"]==1: skor+=1;detail.append("🧠+1")
     if sent["skor_sell"]>=2:  skor-=2;detail.append(f"🧠BEAR-{sent['skor_sell']}")
 
+    # ══ INSTITUSIONAL DATA LAYER ═══════════════
+    # Macro (FRED + AlphaVantage)
+    try:
+        macro = get_macro_cached()
+        if macro["skor_buy"] >= 2:
+            skor += 2; detail.append(f"📊Macro:{macro['sentimen'][:12]}+{macro['skor_buy']}")
+        elif macro["skor_buy"] == 1:
+            skor += 1; detail.append(f"📊Macro+1")
+        if macro["skor_sell"] >= 2:
+            skor -= 2; detail.append(f"📊Macro:{macro['sentimen'][:12]}-{macro['skor_sell']}")
+        elif macro["skor_sell"] == 1:
+            skor -= 1; detail.append(f"📊Macro-1")
+    except Exception as e:
+        macro = {"skor_buy": 0, "skor_sell": 0, "sentimen": "N/A"}
+
+    # Market Depth (CoinGlass + Polygon) — hanya untuk BTC/ETH
+    depth = {"skor_buy": 0, "skor_sell": 0, "sentimen": "N/A"}
+    if any(k in symbol for k in ["BTC","ETH","SOL","BNB"]):
+        try:
+            depth = get_depth_score(symbol)
+            if depth["skor_buy"] >= 2:
+                skor += 2; detail.append(f"🌊Depth:{depth['sentimen'][:10]}+{depth['skor_buy']}")
+            elif depth["skor_buy"] == 1:
+                skor += 1; detail.append("🌊Depth+1")
+            if depth["skor_sell"] >= 2:
+                skor -= 2; detail.append(f"🌊Depth-{depth['skor_sell']}")
+            elif depth["skor_sell"] == 1:
+                skor -= 1; detail.append("🌊Depth-1")
+        except Exception as e:
+            pass
+
+    # On-chain Pro (Glassnode) — hanya BTC/ETH
+    onchain_pro = {"skor_buy": 0, "skor_sell": 0, "sentimen": "N/A"}
+    if any(k in symbol for k in ["BTC","ETH"]):
+        try:
+            onchain_pro = get_onchain_pro_score(symbol)
+            if onchain_pro["skor_buy"] >= 3:
+                skor += 3; detail.append(f"🔗OnChain:{onchain_pro['sentimen'][:12]}🔥")
+            elif onchain_pro["skor_buy"] >= 1:
+                skor += onchain_pro["skor_buy"]
+                detail.append(f"🔗OnChain+{onchain_pro['skor_buy']}")
+            if onchain_pro["skor_sell"] >= 2:
+                skor -= onchain_pro["skor_sell"]
+                detail.append(f"🔗OnChain-{onchain_pro['skor_sell']}")
+        except Exception as e:
+            pass
+    # ═══════════════════════════════════════════
+
     return {
         "symbol":symbol,"skor":skor,"harga":ind["harga"],"rsi":ind["rsi"],
         "atr":ind["atr"],"momentum":ind["momentum"],"ml_pred":ml_pred,
         "ml_conf":ml_conf,"bayes":bh["prob_buy"],"detail":detail,
-        "ind":ind,"df":df,"geo":geo,"mtf":mtf,"ob":ob,"mx":mx,"btc":btc,"sent":sent
+        "ind":ind,"df":df,"geo":geo,"mtf":mtf,"ob":ob,"mx":mx,
+        "btc":btc,"sent":sent,"macro":macro,"depth":depth,"onchain_pro":onchain_pro
     }
 
 # ══════════════════════════════════════════════
@@ -953,13 +1022,12 @@ def jalankan_siklus(siklus, mode_cepat=False):
 
 # ── MAIN ──────────────════════════════════════
 print("="*65)
-print("   BINANCE TRADING BOT v10.2 - ANTI-SL EDITION")
-print(f"   ✅ Min skor    : {MIN_SCORE_SPOT}")
-print(f"   ✅ Volume min  : {VOLUME_FILTER_MIN}x rata-rata")
-print(f"   ✅ SL Cooldown : {SL_COOLDOWN_JAM} jam setelah kena SL")
-print(f"   ✅ Max SL/hari : {MAX_SL_HARIAN} kali lalu stop")
-print(f"   ✅ Trend filter: wajib harga > EMA50")
-print(f"   ✅ Retrain     : silent, tidak spam Telegram")
+print("   BINANCE TRADING BOT v10.3 - INSTITUTIONAL GRADE")
+print(f"   📊 FRED API     : Macro Fed, inflasi, yield curve")
+print(f"   🌊 CoinGlass    : Liquidasi, OI, Long/Short ratio")
+print(f"   🔗 Glassnode    : On-chain whale movement")
+print(f"   💹 AlphaVantage : Forex, commodity correlation")
+print(f"   📈 Polygon.io   : Market microstructure")
 print("="*65)
 
 ml_aktif=load_model()
@@ -970,15 +1038,16 @@ sent_awal=get_sentiment_cached()
 koin_awal=get_top_koin_by_volume()
 
 kirim_telegram(
-    "🚀 <b>Trading Bot v10.2 - Anti-SL Edition!</b>\n\n"
-    f"🛡️ <b>Perlindungan baru v10.2:</b>\n"
-    f"  ✅ SL Cooldown  : {SL_COOLDOWN_JAM} jam / koin setelah SL\n"
-    f"  ✅ Max SL/hari  : stop entry setelah {MAX_SL_HARIAN} SL\n"
-    f"  ✅ Trend filter : wajib harga &gt; EMA50\n"
-    f"  ✅ Retrain      : silent (tidak spam)\n\n"
+    "🚀 <b>Trading Bot v10.3 - Institutional Grade!</b>\n\n"
+    f"📊 <b>Data institusional baru:</b>\n"
+    f"  📊 FRED API    : Makro Fed, inflasi, yield\n"
+    f"  🌊 CoinGlass   : Liquidasi, OI, L/S ratio\n"
+    f"  🔗 Glassnode   : Whale on-chain movement\n"
+    f"  💹 AlphaVantage: Forex & commodity\n"
+    f"  📈 Polygon.io  : Market microstructure\n\n"
+    f"🛡️ Anti-SL: cooldown {SL_COOLDOWN_JAM}h, max {MAX_SL_HARIAN}/hari\n"
     f"📊 Total scan : {len(koin_awal)} koin\n"
     f"₿  BTC Filter : {btc_awal['kondisi']}\n"
-    f"🧠 Sentiment  : {sent_awal.get('sentiment','N/A')}\n"
     f"🌍 Geo        : {geo_awal['sentiment']}\n"
     f"🤖 ML         : {'✅' if ml_aktif else '⚠️'}\n"
     "📌 Status: ✅ Berjalan 24/7"
