@@ -275,5 +275,32 @@
     "waktu_beli": "2026-03-25 20:16:44",
     "waktu_jual": "2026-03-25 23:42:36",
     "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "harga_beli": 92.57,
+    "harga_jual": 91.36,
+    "profit_pct": -1.3071,
+    "waktu_beli": "2026-03-25 23:47:19",
+    "waktu_jual": "2026-03-26 03:09:34",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "FETUSDT",
+    "harga_beli": 0.2646,
+    "harga_jual": 0.2522,
+    "profit_pct": -4.6863,
+    "waktu_beli": "2026-03-26 03:42:07",
+    "waktu_jual": "2026-03-26 12:09:14",
+    "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "FETUSDT",
+    "harga_beli": 0.2646,
+    "harga_jual": 0.2514,
+    "profit_pct": -4.9887,
+    "waktu_beli": "2026-03-26 03:42:20",
+    "waktu_jual": "2026-03-26 12:10:36",
+    "alasan": "SPOT_SL"
   }
 ]

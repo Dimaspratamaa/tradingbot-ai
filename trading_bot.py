@@ -1,3 +1,4 @@
+
 # ============================================
 # BINANCE TRADING BOT v10.1 - OPTIMIZED
 # Perbaikan:
@@ -130,7 +131,13 @@ reconnect_count  = 0
 MAX_RECONNECT    = 10
 RECONNECT_DELAY  = 30
 last_entry_time  = {}
-siklus_cepat     = 0   # Counter untuk dual-speed scan
+siklus_cepat     = 0
+
+# ── PERLINDUNGAN BARU v10.2 ───────────────────
+sl_cooldown      = {}   # {symbol: timestamp} — block entry X jam setelah SL
+sl_harian        = {"tanggal": "", "count": 0}  # Hitung SL hari ini
+MAX_SL_HARIAN    = 3    # Stop entry jika sudah 3 SL dalam sehari
+SL_COOLDOWN_JAM  = 4    # Block entry 4 jam setelah kena SL di koin sama
 
 def buat_client():
     return Client(API_KEY, API_SECRET, testnet=True)
@@ -576,15 +583,56 @@ def scan_semua_koin(koin_list, mode_cepat=False):
     return hasil_scan
 
 # ══════════════════════════════════════════════
-# FIX 1 & 4: VALIDASI ENTRY LEBIH KETAT
+# HELPER: SL COOLDOWN & TREND FILTER
+# ══════════════════════════════════════════════
+
+def catat_sl_koin(symbol):
+    """Catat bahwa symbol baru kena SL — block entry beberapa jam"""
+    global sl_cooldown, sl_harian
+    sl_cooldown[symbol] = time.time()
+
+    # Hitung SL harian
+    hari_ini = time.strftime("%Y-%m-%d")
+    if sl_harian["tanggal"] != hari_ini:
+        sl_harian = {"tanggal": hari_ini, "count": 0}
+    sl_harian["count"] += 1
+
+    print(f"  🛑 SL cooldown aktif untuk {symbol} "
+          f"({SL_COOLDOWN_JAM} jam) | SL hari ini: {sl_harian['count']}")
+
+def cek_sl_cooldown(symbol):
+    """Cek apakah symbol masih dalam cooldown setelah SL"""
+    if symbol not in sl_cooldown:
+        return False
+    selisih_jam = (time.time() - sl_cooldown[symbol]) / 3600
+    return selisih_jam < SL_COOLDOWN_JAM
+
+def cek_max_sl_harian():
+    """Cek apakah sudah mencapai batas SL harian"""
+    hari_ini = time.strftime("%Y-%m-%d")
+    if sl_harian["tanggal"] != hari_ini:
+        return False  # Hari baru, reset
+    return sl_harian["count"] >= MAX_SL_HARIAN
+
+def cek_trend_bullish(ind):
+    """
+    Cek apakah trend koin bullish untuk entry spot.
+    Harga harus di atas EMA50 (uptrend).
+    """
+    harga = ind.get("harga", 0)
+    ema50 = ind.get("ema50", 0)
+    ema20 = ind.get("ema20", 0)
+    if harga <= 0 or ema50 <= 0:
+        return True  # Tidak bisa cek, default allow
+    return harga > ema50 and ema20 > ema50
+
+# ══════════════════════════════════════════════
+# VALIDASI ENTRY v10.2
 # ══════════════════════════════════════════════
 
 def validasi_entry_ketat(symbol, skor, hasil, client):
     """
-    Validasi entry v10.1 — lebih ketat dari v10.0.
-    FIX 1: Skor minimum naik ke 7
-    FIX 2: Volume wajib
-    FIX 4: Smart session bypass
+    Validasi entry v10.2 — tambah SL cooldown, trend filter, max SL harian.
     """
     alasan  = []
     warning = []
@@ -594,7 +642,26 @@ def validasi_entry_ketat(symbol, skor, hasil, client):
     mtf = hasil.get("mtf", {})
     btc = hasil.get("btc", {})
 
-    # ── FIX 1: Skor minimum lebih tinggi ──
+    # ── v10.2: Cek SL cooldown ──
+    if cek_sl_cooldown(symbol):
+        boleh = False
+        jam_sisa = SL_COOLDOWN_JAM - (time.time() - sl_cooldown[symbol]) / 3600
+        alasan.append(f"❌ Cooldown SL ({jam_sisa:.1f} jam lagi)")
+
+    # ── v10.2: Cek max SL harian ──
+    if cek_max_sl_harian():
+        boleh = False
+        alasan.append(f"❌ Max SL harian tercapai ({sl_harian['count']}/{MAX_SL_HARIAN})")
+
+    # ── v10.2: Trend filter — harus uptrend ──
+    if not cek_trend_bullish(ind):
+        boleh = False
+        alasan.append(
+            f"❌ Downtrend: harga ${ind.get('harga',0):.4f} "
+            f"< EMA50 ${ind.get('ema50',0):.4f}"
+        )
+
+    # ── FIX 1: Skor minimum ──
     if skor < MIN_SCORE_SPOT:
         boleh = False
         alasan.append(f"❌ Skor {skor} < min {MIN_SCORE_SPOT}")
@@ -615,12 +682,11 @@ def validasi_entry_ketat(symbol, skor, hasil, client):
         boleh = False
         alasan.append(f"❌ BTC {btc.get('kondisi','?')}: {btc.get('alasan','')}")
 
-    # ── FIX 4: Smart session bypass ──
+    # ── Session filter ──
     from risk_manager import cek_session_aktif
     session = cek_session_aktif(client, symbol)
 
     if not session["aktif"]:
-        # Bypass session jika sinyal SANGAT kuat
         bypass = (
             skor >= SESSION_BYPASS_SKOR and
             vol_ratio >= SESSION_BYPASS_VOL and
@@ -697,12 +763,14 @@ def cek_semua_sl_tp_spot():
             except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,alasan)
             reset_pyramid(symbol)
+            catat_sl_koin(symbol)  # ← v10.2: aktifkan cooldown
             kirim_telegram(
                 f"{emoji} <b>{alasan}! - {symbol}</b>\n"
                 f"💰 Entry: ${pos['harga_beli']:,.4f}\n"
                 f"💰 Exit : ${harga:,.4f}\n"
                 f"📉 P/L: <b>{profit_pct:.2f}%</b> ❌\n"
-                f"📊 SL mode: {pos.get('sl_kondisi','NORMAL')}\n🕐 {waktu}"
+                f"📊 SL mode: {pos.get('sl_kondisi','NORMAL')}\n"
+                f"⏳ Cooldown: {SL_COOLDOWN_JAM} jam\n🕐 {waktu}"
             )
             posisi_spot[symbol]["aktif"]=False
 
@@ -801,8 +869,28 @@ def jalankan_siklus(siklus, mode_cepat=False):
     slot_spot=MAX_POSISI_SPOT-n_spot
     slot_futures=MAX_POSISI_FUTURES-n_futures
 
+    # ── v10.2: Info SL harian ──
+    hari_ini = time.strftime("%Y-%m-%d")
+    sl_hari  = sl_harian["count"] if sl_harian["tanggal"] == hari_ini else 0
+    n_cooldown = sum(1 for s,t in sl_cooldown.items()
+                     if (time.time()-t)/3600 < SL_COOLDOWN_JAM)
     print(f"\n  💰 Spot: {n_spot}/{MAX_POSISI_SPOT} | "
-          f"⚡ Futures: {n_futures}/{MAX_POSISI_FUTURES}")
+          f"⚡ Futures: {n_futures}/{MAX_POSISI_FUTURES} | "
+          f"🛑 SL hari ini: {sl_hari}/{MAX_SL_HARIAN} | "
+          f"⏳ Cooldown: {n_cooldown} koin")
+
+    # ── v10.2: Stop semua entry jika max SL harian tercapai ──
+    if cek_max_sl_harian():
+        print(f"  🚫 MAX SL HARIAN TERCAPAI ({sl_hari}/{MAX_SL_HARIAN}) — entry diblokir!")
+        if sl_hari == MAX_SL_HARIAN:  # Kirim notif hanya sekali
+            kirim_telegram(
+                f"🚫 <b>Max SL Harian Tercapai!</b>\n\n"
+                f"📊 SL hari ini: {sl_hari}/{MAX_SL_HARIAN}\n"
+                f"⏰ Entry diblokir hingga besok\n"
+                f"🛡️ Modal terlindungi dari kerugian lebih lanjut\n"
+                f"🕐 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        return
 
     if slot_spot<=0 and slot_futures<=0:
         print("  ✋ Semua slot penuh!"); return
@@ -865,12 +953,13 @@ def jalankan_siklus(siklus, mode_cepat=False):
 
 # ── MAIN ──────────────════════════════════════
 print("="*65)
-print("   BINANCE TRADING BOT v10.1 - OPTIMIZED EDITION")
-print(f"   ✅ Min skor   : {MIN_SCORE_SPOT} (naik dari 6)")
-print(f"   ✅ Volume min : {VOLUME_FILTER_MIN}x rata-rata")
-print(f"   ✅ Dual scan  : {SCAN_CEPAT_INTERVAL}dtk cepat + {SCAN_FULL_INTERVAL}dtk full")
-print(f"   ✅ Parallel   : {SCAN_MAX_WORKERS} workers, timeout {SCAN_TIMEOUT_PER_KOIN}dtk/koin")
-print(f"   ✅ MTF futures: {'wajib 3/3' if MTF_WAJIB_FUTURES else 'opsional'}")
+print("   BINANCE TRADING BOT v10.2 - ANTI-SL EDITION")
+print(f"   ✅ Min skor    : {MIN_SCORE_SPOT}")
+print(f"   ✅ Volume min  : {VOLUME_FILTER_MIN}x rata-rata")
+print(f"   ✅ SL Cooldown : {SL_COOLDOWN_JAM} jam setelah kena SL")
+print(f"   ✅ Max SL/hari : {MAX_SL_HARIAN} kali lalu stop")
+print(f"   ✅ Trend filter: wajib harga > EMA50")
+print(f"   ✅ Retrain     : silent, tidak spam Telegram")
 print("="*65)
 
 ml_aktif=load_model()
@@ -881,14 +970,12 @@ sent_awal=get_sentiment_cached()
 koin_awal=get_top_koin_by_volume()
 
 kirim_telegram(
-    "🚀 <b>Trading Bot v10.1 - Optimized!</b>\n\n"
-    f"🔧 <b>Perbaikan v10.1:</b>\n"
-    f"  ✅ Min skor naik: 6 → <b>{MIN_SCORE_SPOT}</b>\n"
-    f"  ✅ Volume filter: wajib {VOLUME_FILTER_MIN}x\n"
-    f"  ✅ Dual scan: {SCAN_CEPAT_INTERVAL}s + {SCAN_FULL_INTERVAL}s\n"
-    f"  ✅ Parallel scan: {SCAN_MAX_WORKERS} workers\n"
-    f"  ✅ Session bypass: skor≥{SESSION_BYPASS_SKOR} + vol≥{SESSION_BYPASS_VOL}x\n"
-    f"  ✅ MTF futures: wajib 3/3\n\n"
+    "🚀 <b>Trading Bot v10.2 - Anti-SL Edition!</b>\n\n"
+    f"🛡️ <b>Perlindungan baru v10.2:</b>\n"
+    f"  ✅ SL Cooldown  : {SL_COOLDOWN_JAM} jam / koin setelah SL\n"
+    f"  ✅ Max SL/hari  : stop entry setelah {MAX_SL_HARIAN} SL\n"
+    f"  ✅ Trend filter : wajib harga &gt; EMA50\n"
+    f"  ✅ Retrain      : silent (tidak spam)\n\n"
     f"📊 Total scan : {len(koin_awal)} koin\n"
     f"₿  BTC Filter : {btc_awal['kondisi']}\n"
     f"🧠 Sentiment  : {sent_awal.get('sentiment','N/A')}\n"
