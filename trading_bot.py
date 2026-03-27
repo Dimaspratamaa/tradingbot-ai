@@ -32,6 +32,12 @@ from ml_retrainer import cek_jadwal_retrain as _cek_retrain_internal
 from macro_analyzer import get_macro_score
 from market_depth import get_depth_score
 from onchain_pro import get_onchain_pro_score
+from position_sizer import hitung_posisi_size, get_position_info
+from market_regime import get_regime_params, print_regime_status
+from correlation_filter import (
+    cek_korelasi_dengan_posisi,
+    filter_kandidat_diversifikasi
+)
 
 def cek_jadwal_retrain(client, kirim_telegram):
     """
@@ -129,6 +135,7 @@ geo_cache        = {"data": None, "waktu": 0}
 koin_cache       = {"data": [], "waktu": 0}
 sentiment_cache  = {"data": None, "waktu": 0}
 macro_cache      = {"data": None, "waktu": 0}  # Cache makro 1 jam
+regime_cache     = {"data": None, "waktu": 0}  # Cache regime 15 menit
 bot_running      = True
 reconnect_count  = 0
 MAX_RECONNECT    = 10
@@ -447,7 +454,7 @@ def get_macro_cached():
 # ══════════════════════════════════════════════
 
 def hitung_skor_koin(symbol):
-    """Hitung skor dengan filter lebih ketat (v10.1)"""
+    """Hitung skor dengan filter lebih ketat (v10.4)"""
     df = get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR)
     if df is None: return None
 
@@ -701,7 +708,7 @@ def cek_trend_bullish(ind):
 
 def validasi_entry_ketat(symbol, skor, hasil, client):
     """
-    Validasi entry v10.2 — tambah SL cooldown, trend filter, max SL harian.
+    Validasi entry v10.4 — tambah SL cooldown, trend filter, max SL harian.
     """
     alasan  = []
     warning = []
@@ -849,15 +856,37 @@ def hitung_qty_spot(symbol,harga):
     elif harga>1:  return round(qty,2)
     else:          return round(qty,0)
 
+def _hitung_qty_dari_modal(symbol, harga, modal):
+    """Hitung qty berdasarkan modal dinamis (Kelly)"""
+    qty = modal / harga
+    if harga > 1000:   return round(qty, 3)
+    elif harga > 1:    return round(qty, 2)
+    else:              return round(qty, 0)
+
 def buka_posisi_spot(hasil):
     waktu=time.strftime("%Y-%m-%d %H:%M:%S")
     symbol=hasil["symbol"];harga=hasil["harga"];atr=hasil["atr"]
-    qty=hitung_qty_spot(symbol,harga)
+
+    # ── v10.4: Kelly Criterion Position Sizing ──
+    try:
+        akun    = client.get_account()
+        saldo   = next((float(a["free"]) for a in akun["balances"]
+                       if a["asset"] == "USDT"), TRADE_USDT_SPOT)
+        modal   = hitung_posisi_size(saldo, hasil["skor"])
+        pos_info = get_position_info(saldo, hasil["skor"])
+    except Exception:
+        modal    = TRADE_USDT_SPOT
+        pos_info = {"metode": "DEFAULT", "kelly_f": 0,
+                    "win_rate": 0, "modal": modal}
+
+    qty = _hitung_qty_dari_modal(symbol, harga, modal)
     dyn_sl=hitung_dynamic_sl(harga,atr,hasil.get("df"))
     sl=dyn_sl["sl"];tp=dyn_sl["tp"]
     sl_pct=dyn_sl["sl_pct"];tp_pct=dyn_sl["tp_pct"]
 
-    print(f"\n  💰 [{symbol}] SPOT BUY v10.1! Skor:{hasil['skor']} Qty:{qty}")
+    print(f"\n  💰 [{symbol}] SPOT BUY v10.4! "
+          f"Skor:{hasil['skor']} Modal:${modal:.0f} "
+          f"({pos_info['metode']}) Qty:{qty}")
     try: client.order_market_buy(symbol=symbol,quantity=qty)
     except Exception as e: print(f"  ⚠️  Gagal buy: {e}"); return
 
@@ -866,7 +895,8 @@ def buka_posisi_spot(hasil):
         "aktif":True,"harga_beli":harga,"harga_tertinggi":harga,
         "stop_loss":sl,"take_profit":tp,"waktu_beli":waktu,
         "qty":qty,"atr":atr,"trailing_aktif":False,
-        "sl_kondisi":dyn_sl["kondisi"],"sl_multiplier":dyn_sl["multiplier"]
+        "sl_kondisi":dyn_sl["kondisi"],"sl_multiplier":dyn_sl["multiplier"],
+        "modal":modal,"kelly_f":pos_info.get("kelly_f",0)
     }
 
     mtf=hasil.get("mtf",{});ob=hasil.get("ob",{})
@@ -875,7 +905,7 @@ def buka_posisi_spot(hasil):
     ind=hasil.get("ind",{})
 
     kirim_telegram(
-        f"💰 <b>SPOT BUY v10.1 - {symbol}</b>\n"
+        f"💰 <b>SPOT BUY v10.4 - {symbol}</b>\n"
         f"⭐ Skor    : <b>{hasil['skor']}</b> (min {MIN_SCORE_SPOT})\n"
         f"🤖 ML      : {hasil['ml_pred']} ({hasil['ml_conf']:.0f}%)\n"
         f"📊 MTF     : {mtf.get('summary','N/A')}\n"
@@ -912,12 +942,13 @@ def jalankan_siklus(siklus, mode_cepat=False):
     waktu=time.strftime("%Y-%m-%d %H:%M:%S")
     tipe="⚡ QUICK" if mode_cepat else "🔍 FULL"
     print(f"\n{'='*65}")
-    print(f"⏰ {waktu} | Siklus #{siklus} | {tipe} SCAN | v10.1")
+    print(f"⏰ {waktu} | Siklus #{siklus} | {tipe} SCAN | v10.4")
     print(f"{'='*65}")
 
     if not mode_cepat:
         print("\n📊 Kondisi Market:")
         print_kondisi_market(client)
+        print_regime_status(client)  # ← v10.4: regime detection
         sent=get_sentiment_cached()
         print(f"  🧠 Sentiment: {sent.get('sentiment','N/A')}")
 
@@ -967,16 +998,44 @@ def jalankan_siklus(siklus, mode_cepat=False):
     koin_list  = get_top_koin_by_volume()
     hasil_scan = scan_semua_koin(koin_list, mode_cepat=mode_cepat)
 
-    kandidat = [h for h in hasil_scan if h["skor"] >= MIN_SCORE_SPOT]
+    # ── v10.4: Ambil regime dan sesuaikan min skor ──
+    try:
+        regime     = get_regime_params(client)
+        min_skor_r = regime["min_skor"]
+        max_pos_r  = regime["max_posisi"]
+        print(f"  📊 Regime: {regime['regime']} | "
+              f"MinSkor:{min_skor_r} | MaxPos:{max_pos_r}")
+        # Stop entry jika regime BEAR_KUAT
+        if max_pos_r == 0:
+            print("  🐻 BEAR KUAT — entry spot diblokir!")
+            return
+    except Exception:
+        min_skor_r = MIN_SCORE_SPOT
+        max_pos_r  = MAX_POSISI_SPOT
+
+    # Gunakan min skor yang lebih ketat antara config dan regime
+    min_skor_efektif = max(MIN_SCORE_SPOT, min_skor_r)
+
+    kandidat = [h for h in hasil_scan if h["skor"] >= min_skor_efektif]
+
+    # ── v10.4: Correlation filter ──
+    posisi_aktif_sym = {s: p for s, p in posisi_spot.items() if p.get("aktif")}
+    try:
+        kandidat = filter_kandidat_diversifikasi(
+            client, kandidat, posisi_aktif_sym, max_pos_r
+        )
+    except Exception as e:
+        print(f"  ⚠️  Correlation filter error: {e}")
+
     if kandidat:
-        print(f"\n🏆 Kandidat ({len(kandidat)} lolos skor ≥ {MIN_SCORE_SPOT}):")
+        print(f"\n🏆 Kandidat ({len(kandidat)} lolos skor ≥ {min_skor_efektif}):")
         for i,k in enumerate(kandidat[:3],1):
             print(f"  {i}. {k['symbol']:14} "
                   f"Skor:{k['skor']:+3} | "
                   f"Vol:{k['ind']['vol_ratio']:.1f}x | "
                   f"MTF:{k['mtf']['n_konfirmasi']}/3")
 
-    for hasil in hasil_scan:
+    for hasil in kandidat:  # ← Iterasi kandidat yang sudah difilter
         if slot_spot<=0 and slot_futures<=0: break
         symbol=hasil["symbol"];skor=hasil["skor"]
         mode_fut=hasil["mode_futures"];harga=hasil["harga"]
@@ -1022,7 +1081,11 @@ def jalankan_siklus(siklus, mode_cepat=False):
 
 # ── MAIN ──────────────════════════════════════
 print("="*65)
-print("   BINANCE TRADING BOT v10.3 - INSTITUTIONAL GRADE")
+print("   BINANCE TRADING BOT v10.4 - FULL AI HEDGE FUND")
+print(f"   📊 Kelly Sizing   : otomatis dari win rate")
+print(f"   🌊 Market Regime  : Bull/Bear/Sideways adaptif")
+print(f"   🔄 Corr Filter    : hindari koin berkorelasi")
+print(f"   📊 FRED+CoinGlass+Glassnode: aktif")
 print(f"   📊 FRED API     : Macro Fed, inflasi, yield curve")
 print(f"   🌊 CoinGlass    : Liquidasi, OI, Long/Short ratio")
 print(f"   🔗 Glassnode    : On-chain whale movement")
@@ -1038,7 +1101,7 @@ sent_awal=get_sentiment_cached()
 koin_awal=get_top_koin_by_volume()
 
 kirim_telegram(
-    "🚀 <b>Trading Bot v10.3 - Institutional Grade!</b>\n\n"
+    "🚀 <b>Trading Bot v10.4 - Full AI Hedge Fund!</b>\n\n"
     f"📊 <b>Data institusional baru:</b>\n"
     f"  📊 FRED API    : Makro Fed, inflasi, yield\n"
     f"  🌊 CoinGlass   : Liquidasi, OI, L/S ratio\n"
