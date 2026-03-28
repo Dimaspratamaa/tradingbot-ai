@@ -1,11 +1,16 @@
 # ============================================
-# MULTI EXCHANGE ENGINE v1.0
-# Exchange: Binance + Bybit + OKX + Coinbase
+# MULTI EXCHANGE ENGINE v2.0
+# Exchange: Binance + Indodax + Tokocrypto + Hyperliquid
+#
+# Indodax    : Exchange rupiah Indonesia terbesar
+# Tokocrypto : Exchange Indonesia (ex-Binance partner)
+# Hyperliquid: DEX on-chain perpetual futures
+#
 # Fitur:
-#   1. Price & Volume Aggregator
-#   2. Cross Order Book Analysis  
-#   3. Arbitrage Scanner
-#   4. Smart Order Routing
+#   1. Price aggregator semua exchange
+#   2. Cross Order Book analysis
+#   3. Arbitrase scanner IDR vs USDT
+#   4. Hyperliquid funding rate & OI
 # ============================================
 
 import requests
@@ -17,425 +22,451 @@ import os
 from datetime import datetime
 
 # ── API CREDENTIALS ───────────────────────────
-BYBIT_KEY       = os.environ.get("BYBIT_API_KEY", "")
-BYBIT_SECRET    = os.environ.get("BYBIT_API_SECRET", "")
-OKX_KEY         = os.environ.get("OKX_API_KEY", "")
-OKX_SECRET      = os.environ.get("OKX_API_SECRET", "")
-OKX_PASSPHRASE  = os.environ.get("OKX_PASSPHRASE", "")
-COINBASE_KEY    = os.environ.get("COINBASE_API_KEY", "")
-COINBASE_SECRET = os.environ.get("COINBASE_API_SECRET", "")
+# Indodax
+INDODAX_KEY    = os.environ.get("INDODAX_API_KEY", "WSPHWXIV-BVUCOUQQ-VUSGPPQ2-USAVODEX-FTWCJDHH")
+INDODAX_SECRET = os.environ.get("INDODAX_API_SECRET", "9c7773e8fdaab356eb551ed99814536e02e6d30aead2410035a7c63c21b1019268a25ddbdcadb52b")
 
-# ── KONFIGURASI ───────────────────────────────
-ARBI_THRESHOLD  = 0.3    # Selisih harga >0.3% = arbitrase opportunity
-TRADE_MIN_USD   = 10.0   # Modal minimum per posisi per exchange
-TRADE_MAX_USD   = 50.0   # Modal maksimum per posisi per exchange
+# Tokocrypto
+TOKO_KEY       = os.environ.get("TOKOCRYPTO_API_KEY", "F87dB12E5a0979897F94A76012B4aB14ENIvMv6w2bUvLubgUg5ujiu1h6lNPMlz")
+TOKO_SECRET    = os.environ.get("TOKOCRYPTO_API_SECRET", "f153E5B1cc5aa45b76f4E583b5bF6f21MjXDwtsfFJVmnLEPdWOaObyggxRkhruo")
+
+# Hyperliquid (wallet address untuk trading)
+HL_WALLET      = os.environ.get("HYPERLIQUID_WALLET", "0x5026D53f5B4A882bF4baFe5D4487E1885B96C29")
+HL_SECRET      = os.environ.get("HYPERLIQUID_SECRET", "0x24fd1d859639b85da24de77d397821e72994cadeca11e695169d91a3713044cb")
+
+# Rate IDR/USD — update berkala
+IDR_PER_USD    = 16200   # Estimasi, diupdate otomatis
+
+# Threshold arbitrase
+ARBI_THRESHOLD = 0.5     # 0.5% profit minimum setelah fee
 
 # ── SYMBOL MAPPING ────────────────────────────
-# Setiap exchange punya format symbol berbeda
+# Format berbeda tiap exchange
 SYMBOL_MAP = {
-    "BTCUSDT" : {"bybit": "BTCUSDT", "okx": "BTC-USDT", "coinbase": "BTC-USDT"},
-    "ETHUSDT" : {"bybit": "ETHUSDT", "okx": "ETH-USDT", "coinbase": "ETH-USDT"},
-    "BNBUSDT" : {"bybit": "BNBUSDT", "okx": "BNB-USDT", "coinbase": None},
-    "SOLUSDT" : {"bybit": "SOLUSDT", "okx": "SOL-USDT", "coinbase": "SOL-USDT"},
-    "ADAUSDT" : {"bybit": "ADAUSDT", "okx": "ADA-USDT", "coinbase": "ADA-USDT"},
-    "XRPUSDT" : {"bybit": "XRPUSDT", "okx": "XRP-USDT", "coinbase": "XRP-USD"},
-    "DOGEUSDT": {"bybit": "DOGEUSDT","okx": "DOGE-USDT","coinbase": "DOGE-USDT"},
-    "AVAXUSDT": {"bybit": "AVAXUSDT","okx": "AVAX-USDT","coinbase": "AVAX-USDT"},
-    "DOTUSDT" : {"bybit": "DOTUSDT", "okx": "DOT-USDT", "coinbase": "DOT-USDT"},
-    "LINKUSDT": {"bybit": "LINKUSDT","okx": "LINK-USDT","coinbase": "LINK-USDT"},
+    "BTCUSDT" : {"indodax": "btc_idr",  "toko": "BTC_USDT",  "hl": "BTC"},
+    "ETHUSDT" : {"indodax": "eth_idr",  "toko": "ETH_USDT",  "hl": "ETH"},
+    "BNBUSDT" : {"indodax": "bnb_idr",  "toko": "BNB_USDT",  "hl": None},
+    "SOLUSDT" : {"indodax": "sol_idr",  "toko": "SOL_USDT",  "hl": "SOL"},
+    "XRPUSDT" : {"indodax": "xrp_idr",  "toko": "XRP_USDT",  "hl": "XRP"},
+    "ADAUSDT" : {"indodax": "ada_idr",  "toko": "ADA_USDT",  "hl": "ADA"},
+    "DOGEUSDT": {"indodax": "doge_idr", "toko": "DOGE_USDT", "hl": "DOGE"},
+    "AVAXUSDT": {"indodax": "avax_idr", "toko": "AVAX_USDT", "hl": "AVAX"},
+    "DOTUSDT" : {"indodax": "dot_idr",  "toko": "DOT_USDT",  "hl": "DOT"},
+    "LINKUSDT": {"indodax": "link_idr", "toko": "LINK_USDT", "hl": "LINK"},
+    "MATICUSDT":{"indodax": "matic_idr","toko": "MATIC_USDT","hl": "MATIC"},
+    "UNIUSDT" : {"indodax": "uni_idr",  "toko": "UNI_USDT",  "hl": "UNI"},
+    "HYPEUSDT": {"indodax": None,        "toko": None,        "hl": "HYPE"},
 }
 
 # ══════════════════════════════════════════════
-# BYBIT CONNECTOR
+# HELPER: UPDATE KURS IDR
 # ══════════════════════════════════════════════
 
-def _bybit_sign(params, secret):
-    """Generate signature untuk Bybit API"""
-    timestamp  = str(int(time.time() * 1000))
-    recv_window = "5000"
-    param_str  = timestamp + BYBIT_KEY + recv_window + params
-    signature  = hmac.new(
-        secret.encode("utf-8"),
-        param_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    return timestamp, signature
+_idr_cache = {"rate": 16200, "waktu": 0}
 
-def bybit_get_price(symbol):
-    """Ambil harga terbaru dari Bybit"""
+def get_idr_rate():
+    """Ambil kurs IDR/USD terkini"""
+    global _idr_cache
+    if time.time() - _idr_cache["waktu"] < 3600:
+        return _idr_cache["rate"]
     try:
-        url    = f"https://api.bybit.com/v5/market/tickers"
-        params = {"category": "spot", "symbol": symbol}
-        resp   = requests.get(url, params=params, timeout=5)
-        data   = resp.json()
-        if data["retCode"] == 0:
-            ticker = data["result"]["list"][0]
-            return {
-                "exchange": "bybit",
-                "symbol"  : symbol,
-                "price"   : float(ticker["lastPrice"]),
-                "volume"  : float(ticker["volume24h"]),
-                "bid"     : float(ticker["bid1Price"]),
-                "ask"     : float(ticker["ask1Price"]),
-                "change"  : float(ticker["price24hPcnt"]) * 100
-            }
-    except Exception as e:
-        print(f"  ⚠️  Bybit price error {symbol}: {e}")
-    return None
-
-def bybit_get_orderbook(symbol, limit=20):
-    """Ambil order book dari Bybit"""
-    try:
-        url    = "https://api.bybit.com/v5/market/orderbook"
-        params = {"category": "spot", "symbol": symbol, "limit": limit}
-        resp   = requests.get(url, params=params, timeout=5)
-        data   = resp.json()
-        if data["retCode"] == 0:
-            return {
-                "exchange": "bybit",
-                "bids"    : [[float(b[0]), float(b[1])] for b in data["result"]["b"]],
-                "asks"    : [[float(a[0]), float(a[1])] for a in data["result"]["a"]]
-            }
-    except Exception as e:
-        print(f"  ⚠️  Bybit OB error {symbol}: {e}")
-    return None
-
-def bybit_place_order(symbol, side, qty, order_type="Market"):
-    """Eksekusi order di Bybit"""
-    if not BYBIT_KEY or not BYBIT_SECRET:
-        return {"error": "Bybit API key tidak tersedia"}
-    try:
-        url       = "https://api.bybit.com/v5/order/create"
-        body      = json.dumps({
-            "category"  : "spot",
-            "symbol"    : symbol,
-            "side"      : side.capitalize(),
-            "orderType" : order_type,
-            "qty"       : str(qty),
-            "marketUnit": "quoteCoin"
-        })
-        timestamp, sig = _bybit_sign(body, BYBIT_SECRET)
-        headers = {
-            "X-BAPI-API-KEY"    : BYBIT_KEY,
-            "X-BAPI-TIMESTAMP"  : timestamp,
-            "X-BAPI-SIGN"       : sig,
-            "X-BAPI-RECV-WINDOW": "5000",
-            "Content-Type"      : "application/json"
-        }
-        resp = requests.post(url, headers=headers, data=body, timeout=10)
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def bybit_get_balance():
-    """Cek saldo USDT di Bybit"""
-    if not BYBIT_KEY:
-        return 0.0
-    try:
-        url    = "https://api.bybit.com/v5/account/wallet-balance"
-        params = "accountType=UNIFIED"
-        timestamp, sig = _bybit_sign(params, BYBIT_SECRET)
-        headers = {
-            "X-BAPI-API-KEY"    : BYBIT_KEY,
-            "X-BAPI-TIMESTAMP"  : timestamp,
-            "X-BAPI-SIGN"       : sig,
-            "X-BAPI-RECV-WINDOW": "5000"
-        }
         resp = requests.get(
-            f"https://api.bybit.com/v5/account/wallet-balance?{params}",
-            headers=headers, timeout=5
+            "https://open.er-api.com/v6/latest/USD",
+            timeout=5
         )
         data = resp.json()
-        if data["retCode"] == 0:
-            for coin in data["result"]["list"][0]["coin"]:
-                if coin["coin"] == "USDT":
-                    return float(coin["availableToWithdraw"])
-    except Exception as e:
-        print(f"  ⚠️  Bybit balance error: {e}")
-    return 0.0
+        rate = data.get("rates", {}).get("IDR", 16200)
+        _idr_cache = {"rate": rate, "waktu": time.time()}
+        return rate
+    except:
+        return _idr_cache["rate"]
+
+def idr_to_usd(harga_idr):
+    """Konversi harga IDR ke USD"""
+    return harga_idr / get_idr_rate()
 
 # ══════════════════════════════════════════════
-# OKX CONNECTOR
+# INDODAX CONNECTOR
 # ══════════════════════════════════════════════
 
-def _okx_sign(timestamp, method, path, body=""):
-    """Generate signature untuk OKX API"""
-    msg = timestamp + method + path + body
-    sig = hmac.new(
-        OKX_SECRET.encode("utf-8"),
-        msg.encode("utf-8"),
-        hashlib.sha256
-    ).digest()
-    import base64
-    return base64.b64encode(sig).decode()
-
-def _okx_headers(method, path, body=""):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    sig = _okx_sign(timestamp, method, path, body)
-    return {
-        "OK-ACCESS-KEY"       : OKX_KEY,
-        "OK-ACCESS-SIGN"      : sig,
-        "OK-ACCESS-TIMESTAMP" : timestamp,
-        "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
-        "Content-Type"        : "application/json"
-    }
-
-def okx_get_price(symbol):
-    """Ambil harga dari OKX"""
+def indodax_get_price(pair="btc_idr"):
+    """
+    Ambil harga dari Indodax Public API (tanpa key).
+    Return harga dalam USD (dikonversi dari IDR).
+    """
     try:
-        url  = f"https://www.okx.com/api/v5/market/ticker"
-        params = {"instId": symbol}
-        resp = requests.get(url, params=params, timeout=5)
+        url  = f"https://indodax.com/api/{pair}/ticker"
+        resp = requests.get(url, timeout=8)
         data = resp.json()
-        if data["code"] == "0" and data["data"]:
-            d = data["data"][0]
+        ticker = data.get("ticker", {})
+        if ticker:
+            harga_idr = float(ticker.get("last", 0))
+            harga_usd = idr_to_usd(harga_idr)
+            vol_idr   = float(ticker.get("vol_idr", 0))
             return {
-                "exchange": "okx",
-                "symbol"  : symbol,
-                "price"   : float(d["last"]),
-                "volume"  : float(d["vol24h"]),
-                "bid"     : float(d["bidPx"]),
-                "ask"     : float(d["askPx"]),
-                "change"  : float(d["sodUtc8"]) if d.get("sodUtc8") else 0
+                "exchange" : "indodax",
+                "pair"     : pair,
+                "harga_idr": harga_idr,
+                "harga_usd": harga_usd,
+                "volume"   : vol_idr / get_idr_rate(),
+                "bid_usd"  : idr_to_usd(float(ticker.get("buy", 0))),
+                "ask_usd"  : idr_to_usd(float(ticker.get("sell", 0))),
             }
     except Exception as e:
-        print(f"  ⚠️  OKX price error {symbol}: {e}")
+        print(f"  ⚠️  Indodax {pair} error: {e}")
     return None
 
-def okx_get_orderbook(symbol, limit=20):
-    """Ambil order book dari OKX"""
+def indodax_place_order(pair, order_type, price_idr, amount):
+    """Eksekusi order di Indodax"""
+    if not INDODAX_KEY or not INDODAX_SECRET:
+        return {"error": "Indodax API key tidak tersedia"}
     try:
-        url    = "https://www.okx.com/api/v5/market/books"
-        params = {"instId": symbol, "sz": limit}
-        resp   = requests.get(url, params=params, timeout=5)
-        data   = resp.json()
-        if data["code"] == "0" and data["data"]:
-            ob = data["data"][0]
-            return {
-                "exchange": "okx",
-                "bids"    : [[float(b[0]), float(b[1])] for b in ob["bids"]],
-                "asks"    : [[float(a[0]), float(a[1])] for a in ob["asks"]]
-            }
-    except Exception as e:
-        print(f"  ⚠️  OKX OB error {symbol}: {e}")
-    return None
-
-def okx_place_order(symbol, side, qty_usdt):
-    """Eksekusi order di OKX"""
-    if not OKX_KEY:
-        return {"error": "OKX API key tidak tersedia"}
-    try:
-        path = "/api/v5/trade/order"
-        body = json.dumps({
-            "instId" : symbol,
-            "tdMode" : "cash",
-            "side"   : side.lower(),
-            "ordType": "market",
-            "sz"     : str(qty_usdt),
-            "tgtCcy" : "quote_ccy"
-        })
-        headers = _okx_headers("POST", path, body)
-        resp    = requests.post(
-            f"https://www.okx.com{path}",
-            headers=headers, data=body, timeout=10
-        )
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def okx_get_balance():
-    """Cek saldo USDT di OKX"""
-    if not OKX_KEY:
-        return 0.0
-    try:
-        path    = "/api/v5/account/balance?ccy=USDT"
-        headers = _okx_headers("GET", path)
-        resp    = requests.get(
-            f"https://www.okx.com{path}",
-            headers=headers, timeout=5
-        )
-        data = resp.json()
-        if data["code"] == "0" and data["data"]:
-            for detail in data["data"][0]["details"]:
-                if detail["ccy"] == "USDT":
-                    return float(detail["availBal"])
-    except Exception as e:
-        print(f"  ⚠️  OKX balance error: {e}")
-    return 0.0
-
-# ══════════════════════════════════════════════
-# COINBASE CONNECTOR
-# ══════════════════════════════════════════════
-
-def coinbase_get_price(symbol):
-    """Ambil harga dari Coinbase (public API, no key needed)"""
-    try:
-        url  = f"https://api.coinbase.com/api/v3/brokerage/market/products/{symbol}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if "price" in data:
-            return {
-                "exchange": "coinbase",
-                "symbol"  : symbol,
-                "price"   : float(data["price"]),
-                "volume"  : float(data.get("volume_24h", 0)),
-                "bid"     : float(data.get("best_bid", 0)),
-                "ask"     : float(data.get("best_ask", 0)),
-                "change"  : float(data.get("price_percentage_change_24h", 0))
-            }
-    except Exception as e:
-        print(f"  ⚠️  Coinbase price error {symbol}: {e}")
-    return None
-
-def coinbase_get_orderbook(symbol, limit=20):
-    """Ambil order book dari Coinbase"""
-    try:
-        url    = f"https://api.coinbase.com/api/v3/brokerage/market/product_book"
-        params = {"product_id": symbol, "limit": limit}
-        resp   = requests.get(url, params=params, timeout=5)
-        data   = resp.json()
-        if "pricebook" in data:
-            pb = data["pricebook"]
-            return {
-                "exchange": "coinbase",
-                "bids"    : [[float(b["price"]), float(b["size"])] for b in pb.get("bids", [])],
-                "asks"    : [[float(a["price"]), float(a["size"])] for a in pb.get("asks", [])]
-            }
-    except Exception as e:
-        print(f"  ⚠️  Coinbase OB error {symbol}: {e}")
-    return None
-
-def coinbase_place_order(symbol, side, qty_usdt):
-    """Eksekusi order di Coinbase"""
-    if not COINBASE_KEY:
-        return {"error": "Coinbase API key tidak tersedia"}
-    try:
-        import uuid
-        path = "/api/v3/brokerage/orders"
-        body = json.dumps({
-            "client_order_id": str(uuid.uuid4()),
-            "product_id"     : symbol,
-            "side"           : side.upper(),
-            "order_configuration": {
-                "market_market_ioc": {
-                    "quote_size": str(qty_usdt)
-                }
-            }
-        })
-        # Coinbase JWT auth (simplified)
-        timestamp = str(int(time.time()))
-        msg       = f"{timestamp}POST{path}{body}"
-        sig       = hmac.new(
-            COINBASE_SECRET.encode(),
-            msg.encode(), hashlib.sha256
+        nonce     = str(int(time.time() * 1000))
+        params    = {
+            "method"     : "trade",
+            "pair"       : pair,
+            "type"       : order_type,   # "buy" atau "sell"
+            "price"      : str(int(price_idr)),
+            "idr"        : str(int(amount)) if order_type == "buy" else "",
+            "nonce"      : nonce
+        }
+        body      = "&".join(f"{k}={v}" for k,v in params.items())
+        signature = hmac.new(
+            INDODAX_SECRET.encode(),
+            body.encode(),
+            hashlib.sha512
         ).hexdigest()
-        headers = {
-            "CB-ACCESS-KEY"      : COINBASE_KEY,
-            "CB-ACCESS-SIGN"     : sig,
-            "CB-ACCESS-TIMESTAMP": timestamp,
-            "Content-Type"       : "application/json"
+        headers   = {
+            "Key"  : INDODAX_KEY,
+            "Sign" : signature
         }
         resp = requests.post(
-            f"https://api.coinbase.com{path}",
-            headers=headers, data=body, timeout=10
+            "https://indodax.com/tapi",
+            data=params, headers=headers, timeout=15
         )
         return resp.json()
     except Exception as e:
         return {"error": str(e)}
 
-def coinbase_get_balance():
-    """Cek saldo USD/USDT di Coinbase"""
-    if not COINBASE_KEY:
+def indodax_get_balance():
+    """Cek saldo IDR di Indodax"""
+    if not INDODAX_KEY:
+        return {"idr": 0, "usd": 0}
+    try:
+        nonce  = str(int(time.time() * 1000))
+        params = {"method": "getInfo", "nonce": nonce}
+        body   = "&".join(f"{k}={v}" for k,v in params.items())
+        sig    = hmac.new(
+            INDODAX_SECRET.encode(),
+            body.encode(), hashlib.sha512
+        ).hexdigest()
+        headers = {"Key": INDODAX_KEY, "Sign": sig}
+        resp    = requests.post(
+            "https://indodax.com/tapi",
+            data=params, headers=headers, timeout=10
+        )
+        data    = resp.json()
+        if data.get("success"):
+            balance = data["return"]["balance"]
+            idr_bal = float(balance.get("idr", 0))
+            return {"idr": idr_bal, "usd": idr_to_usd(idr_bal)}
+    except Exception as e:
+        print(f"  ⚠️  Indodax balance error: {e}")
+    return {"idr": 0, "usd": 0}
+
+# ══════════════════════════════════════════════
+# TOKOCRYPTO CONNECTOR
+# ══════════════════════════════════════════════
+
+def toko_get_price(symbol="BTC_USDT"):
+    """Ambil harga dari Tokocrypto Public API"""
+    try:
+        url    = "https://www.tokocrypto.com/open/v1/market/ticker"
+        params = {"symbol": symbol}
+        resp   = requests.get(url, params=params, timeout=8)
+        data   = resp.json()
+        if data.get("code") == 0 and data.get("data"):
+            d = data["data"]
+            return {
+                "exchange": "tokocrypto",
+                "symbol"  : symbol,
+                "harga_usd": float(d.get("c", 0)),
+                "volume"  : float(d.get("q", 0)),
+                "bid_usd" : float(d.get("b", 0)),
+                "ask_usd" : float(d.get("a", 0)),
+                "change"  : float(d.get("p", 0))
+            }
+    except Exception as e:
+        print(f"  ⚠️  Tokocrypto {symbol} error: {e}")
+    return None
+
+def _toko_sign(params, secret):
+    """Generate signature Tokocrypto"""
+    query  = "&".join(f"{k}={v}" for k,v in sorted(params.items()))
+    return hmac.new(
+        secret.encode(),
+        query.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+def toko_place_order(symbol, side, qty, order_type="MARKET"):
+    """Eksekusi order di Tokocrypto"""
+    if not TOKO_KEY or not TOKO_SECRET:
+        return {"error": "Tokocrypto API key tidak tersedia"}
+    try:
+        ts     = int(time.time() * 1000)
+        params = {
+            "symbol"    : symbol,
+            "side"      : side.upper(),
+            "type"      : order_type,
+            "quantity"  : str(qty),
+            "timestamp" : ts,
+            "recvWindow": 5000
+        }
+        params["signature"] = _toko_sign(params, TOKO_SECRET)
+        headers = {"X-MBX-APIKEY": TOKO_KEY}
+        resp    = requests.post(
+            "https://www.tokocrypto.com/open/v1/orders",
+            params=params, headers=headers, timeout=15
+        )
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def toko_get_balance():
+    """Cek saldo USDT di Tokocrypto"""
+    if not TOKO_KEY:
         return 0.0
     try:
-        timestamp = str(int(time.time()))
-        path      = "/api/v3/brokerage/accounts"
-        msg       = f"{timestamp}GET{path}"
-        sig       = hmac.new(
-            COINBASE_SECRET.encode(),
-            msg.encode(), hashlib.sha256
-        ).hexdigest()
-        headers = {
-            "CB-ACCESS-KEY"      : COINBASE_KEY,
-            "CB-ACCESS-SIGN"     : sig,
-            "CB-ACCESS-TIMESTAMP": timestamp
-        }
-        resp = requests.get(
-            f"https://api.coinbase.com{path}",
-            headers=headers, timeout=5
+        ts     = int(time.time() * 1000)
+        params = {"timestamp": ts, "recvWindow": 5000}
+        params["signature"] = _toko_sign(params, TOKO_SECRET)
+        headers = {"X-MBX-APIKEY": TOKO_KEY}
+        resp    = requests.get(
+            "https://www.tokocrypto.com/open/v1/account/spot",
+            params=params, headers=headers, timeout=10
         )
         data = resp.json()
-        for acc in data.get("accounts", []):
-            if acc.get("currency") in ["USD", "USDT"]:
-                return float(acc["available_balance"]["value"])
+        if data.get("code") == 0:
+            for asset in data.get("data", {}).get("balances", []):
+                if asset.get("asset") == "USDT":
+                    return float(asset.get("free", 0))
     except Exception as e:
-        print(f"  ⚠️  Coinbase balance error: {e}")
+        print(f"  ⚠️  Tokocrypto balance error: {e}")
     return 0.0
+
+# ══════════════════════════════════════════════
+# HYPERLIQUID DEX CONNECTOR
+# ══════════════════════════════════════════════
+
+HL_BASE = "https://api.hyperliquid.xyz"
+
+def hl_get_price(coin="BTC"):
+    """
+    Ambil harga dari Hyperliquid.
+    Hyperliquid adalah DEX perpetual on-chain.
+    """
+    try:
+        url  = f"{HL_BASE}/info"
+        body = {"type": "allMids"}
+        resp = requests.post(url, json=body, timeout=8)
+        data = resp.json()
+        if isinstance(data, dict) and coin in data:
+            harga = float(data[coin])
+            return {
+                "exchange" : "hyperliquid",
+                "coin"     : coin,
+                "harga_usd": harga,
+                "tipe"     : "perp_dex"
+            }
+    except Exception as e:
+        print(f"  ⚠️  Hyperliquid price {coin} error: {e}")
+    return None
+
+def hl_get_funding_rate(coin="BTC"):
+    """
+    Ambil funding rate dari Hyperliquid.
+    Funding rate DEX = indikator sentimen futures on-chain.
+    """
+    try:
+        url  = f"{HL_BASE}/info"
+        body = {"type": "metaAndAssetCtxs"}
+        resp = requests.post(url, json=body, timeout=8)
+        data = resp.json()
+
+        if isinstance(data, list) and len(data) >= 2:
+            meta      = data[0]
+            asset_ctx = data[1]
+            universe  = meta.get("universe", [])
+
+            for i, asset in enumerate(universe):
+                if asset.get("name") == coin and i < len(asset_ctx):
+                    ctx = asset_ctx[i]
+                    return {
+                        "coin"        : coin,
+                        "funding_rate": float(ctx.get("funding", 0)),
+                        "open_interest": float(ctx.get("openInterest", 0)),
+                        "mark_price"  : float(ctx.get("markPx", 0)),
+                        "premium"     : float(ctx.get("premium", 0))
+                    }
+    except Exception as e:
+        print(f"  ⚠️  Hyperliquid funding {coin} error: {e}")
+    return None
+
+def hl_get_orderbook(coin="BTC"):
+    """Ambil order book dari Hyperliquid"""
+    try:
+        url  = f"{HL_BASE}/info"
+        body = {"type": "l2Book", "coin": coin}
+        resp = requests.post(url, json=body, timeout=8)
+        data = resp.json()
+        levels = data.get("levels", [[], []])
+        bids   = [[float(b["px"]), float(b["sz"])] for b in levels[0][:10]]
+        asks   = [[float(a["px"]), float(a["sz"])] for a in levels[1][:10]]
+        return {
+            "exchange": "hyperliquid",
+            "coin"    : coin,
+            "bids"    : bids,
+            "asks"    : asks
+        }
+    except Exception as e:
+        print(f"  ⚠️  Hyperliquid OB {coin} error: {e}")
+    return None
+
+def hl_place_order(coin, is_buy, sz, limit_px=None, order_type="market"):
+    """
+    Eksekusi order di Hyperliquid DEX.
+    Butuh wallet address dan private key.
+    """
+    if not HL_WALLET or not HL_SECRET:
+        return {"error": "Hyperliquid wallet/secret tidak tersedia"}
+    try:
+        # Hyperliquid pakai EIP-712 signing
+        # Untuk market order sederhana
+        ts   = int(time.time() * 1000)
+        body = {
+            "action": {
+                "type"  : "order",
+                "orders": [{
+                    "a"   : 0,           # Asset index
+                    "b"   : is_buy,
+                    "p"   : str(limit_px) if limit_px else "0",
+                    "s"   : str(sz),
+                    "r"   : False,       # reduce only
+                    "t"   : {"limit": {"tif": "Ioc"}} if not limit_px
+                             else {"limit": {"tif": "Gtc"}}
+                }],
+                "grouping": "na"
+            },
+            "nonce" : ts,
+            "signature": {"r": "0x0", "s": "0x0", "v": 0}  # Placeholder
+        }
+        resp = requests.post(
+            f"{HL_BASE}/exchange",
+            json=body,
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def hl_get_balance():
+    """Cek saldo USDC di Hyperliquid"""
+    if not HL_WALLET:
+        return 0.0
+    try:
+        url  = f"{HL_BASE}/info"
+        body = {
+            "type"   : "clearinghouseState",
+            "user"   : HL_WALLET
+        }
+        resp = requests.post(url, json=body, timeout=8)
+        data = resp.json()
+        margin = data.get("marginSummary", {})
+        return float(margin.get("accountValue", 0))
+    except Exception as e:
+        print(f"  ⚠️  Hyperliquid balance error: {e}")
+    return 0.0
+
+def hl_get_positions():
+    """Cek posisi futures di Hyperliquid"""
+    if not HL_WALLET:
+        return []
+    try:
+        url  = f"{HL_BASE}/info"
+        body = {"type": "clearinghouseState", "user": HL_WALLET}
+        resp = requests.post(url, json=body, timeout=8)
+        data = resp.json()
+        positions = []
+        for pos in data.get("assetPositions", []):
+            p = pos.get("position", {})
+            if float(p.get("szi", 0)) != 0:
+                positions.append({
+                    "coin"       : p.get("coin", ""),
+                    "size"       : float(p.get("szi", 0)),
+                    "entry_price": float(p.get("entryPx", 0)),
+                    "unrealized" : float(p.get("unrealizedPnl", 0)),
+                    "leverage"   : p.get("leverage", {})
+                })
+        return positions
+    except Exception as e:
+        print(f"  ⚠️  Hyperliquid positions error: {e}")
+    return []
 
 # ══════════════════════════════════════════════
 # PRICE AGGREGATOR
 # ══════════════════════════════════════════════
 
 def get_all_prices(binance_client, symbol):
-    """
-    Ambil harga dari semua exchange sekaligus.
-    Return: dict dengan harga per exchange + agregat
-    """
-    # Symbol mapping
-    sym_map = SYMBOL_MAP.get(symbol, {})
-    hasil   = {}
+    """Ambil harga dari semua exchange"""
+    sym_map  = SYMBOL_MAP.get(symbol, {})
+    hasil    = {}
 
-    # Binance
+    # Binance (selalu)
     try:
         ticker = binance_client.get_symbol_ticker(symbol=symbol)
         ob     = binance_client.get_order_book(symbol=symbol, limit=5)
         hasil["binance"] = {
-            "exchange": "binance",
-            "symbol"  : symbol,
-            "price"   : float(ticker["price"]),
-            "bid"     : float(ob["bids"][0][0]),
-            "ask"     : float(ob["asks"][0][0]),
-            "volume"  : 0,
-            "change"  : 0
+            "exchange" : "binance",
+            "harga_usd": float(ticker["price"]),
+            "bid_usd"  : float(ob["bids"][0][0]),
+            "ask_usd"  : float(ob["asks"][0][0]),
+            "volume"   : 0
         }
-    except Exception as e:
-        print(f"  ⚠️  Binance price error: {e}")
+    except: pass
 
-    # Bybit
-    bybit_sym = sym_map.get("bybit")
-    if bybit_sym:
-        data = bybit_get_price(bybit_sym)
-        if data:
-            hasil["bybit"] = data
+    # Indodax
+    indodax_pair = sym_map.get("indodax")
+    if indodax_pair:
+        d = indodax_get_price(indodax_pair)
+        if d: hasil["indodax"] = d
 
-    # OKX
-    okx_sym = sym_map.get("okx")
-    if okx_sym:
-        data = okx_get_price(okx_sym)
-        if data:
-            hasil["okx"] = data
+    # Tokocrypto
+    toko_sym = sym_map.get("toko")
+    if toko_sym:
+        d = toko_get_price(toko_sym)
+        if d: hasil["tokocrypto"] = d
 
-    # Coinbase
-    cb_sym = sym_map.get("coinbase")
-    if cb_sym:
-        data = coinbase_get_price(cb_sym)
-        if data:
-            hasil["coinbase"] = data
+    # Hyperliquid
+    hl_coin = sym_map.get("hl")
+    if hl_coin:
+        d = hl_get_price(hl_coin)
+        if d: hasil["hyperliquid"] = d
 
     if not hasil:
         return None
 
-    # ── Hitung agregat ──
-    harga_list  = [v["price"] for v in hasil.values()]
-    volume_list = [v.get("volume", 0) for v in hasil.values()]
+    harga_list = [v["harga_usd"] for v in hasil.values() if v.get("harga_usd",0) > 0]
+    if not harga_list:
+        return None
 
     agregat = {
         "n_exchange"  : len(hasil),
         "harga_avg"   : sum(harga_list) / len(harga_list),
         "harga_max"   : max(harga_list),
         "harga_min"   : min(harga_list),
-        "spread_pct"  : ((max(harga_list) - min(harga_list)) / min(harga_list)) * 100,
-        "volume_total": sum(volume_list),
+        "spread_pct"  : ((max(harga_list)-min(harga_list))/min(harga_list))*100,
         "exchanges"   : list(hasil.keys())
     }
 
@@ -446,375 +477,220 @@ def get_all_prices(binance_client, symbol):
 # ══════════════════════════════════════════════
 
 def cross_orderbook_analysis(binance_client, symbol):
-    """
-    Analisis order book dari semua exchange.
-    Cari tekanan beli/jual yang konsisten.
-    """
-    sym_map = SYMBOL_MAP.get(symbol, {})
+    """Analisis order book dari semua exchange"""
+    sym_map  = SYMBOL_MAP.get(symbol, {})
     semua_ob = []
 
-    # Binance OB
     try:
         ob = binance_client.get_order_book(symbol=symbol, limit=20)
         semua_ob.append({
             "exchange": "binance",
-            "bids"    : [[float(b[0]), float(b[1])] for b in ob["bids"]],
-            "asks"    : [[float(a[0]), float(a[1])] for a in ob["asks"]]
+            "bids": [[float(b[0]),float(b[1])] for b in ob["bids"]],
+            "asks": [[float(a[0]),float(a[1])] for a in ob["asks"]]
         })
     except: pass
 
-    # Bybit OB
-    if sym_map.get("bybit"):
-        ob = bybit_get_orderbook(sym_map["bybit"])
-        if ob: semua_ob.append(ob)
-
-    # OKX OB
-    if sym_map.get("okx"):
-        ob = okx_get_orderbook(sym_map["okx"])
-        if ob: semua_ob.append(ob)
-
-    # Coinbase OB
-    if sym_map.get("coinbase"):
-        ob = coinbase_get_orderbook(sym_map["coinbase"])
+    hl_coin = sym_map.get("hl")
+    if hl_coin:
+        ob = hl_get_orderbook(hl_coin)
         if ob: semua_ob.append(ob)
 
     if not semua_ob:
         return _default_cross_ob()
 
-    # ── Analisis per exchange ──
     imbalances = []
-    bullish_count = 0
-    bearish_count = 0
+    bull_count = bear_count = 0
 
     for ob in semua_ob:
-        bid_vol = sum(p * q for p, q in ob["bids"][:10])
-        ask_vol = sum(p * q for p, q in ob["asks"][:10])
+        bid_vol = sum(p*q for p,q in ob["bids"][:10])
+        ask_vol = sum(p*q for p,q in ob["asks"][:10])
         if ask_vol > 0:
             imb = bid_vol / ask_vol
             imbalances.append(imb)
-            if imb >= 1.3:
-                bullish_count += 1
-            elif imb <= 0.7:
-                bearish_count += 1
+            if imb >= 1.3: bull_count += 1
+            elif imb <= 0.7: bear_count += 1
 
-    avg_imbalance = sum(imbalances) / len(imbalances) if imbalances else 1.0
-    n_exchange    = len(semua_ob)
+    avg_imb  = sum(imbalances)/len(imbalances) if imbalances else 1.0
+    n_ex     = len(semua_ob)
 
-    # ── Konsensus cross-exchange ──
-    # Lebih kuat jika semua exchange sepakat
-    if bullish_count == n_exchange:
-        sinyal    = "BULLISH_KONSENSUS"
-        skor_buy  = 3
-        skor_sell = 0
-    elif bullish_count >= n_exchange * 0.6:
-        sinyal    = "BULLISH_MAYORITAS"
-        skor_buy  = 2
-        skor_sell = 0
-    elif bearish_count == n_exchange:
-        sinyal    = "BEARISH_KONSENSUS"
-        skor_buy  = 0
-        skor_sell = 3
-    elif bearish_count >= n_exchange * 0.6:
-        sinyal    = "BEARISH_MAYORITAS"
-        skor_buy  = 0
-        skor_sell = 2
+    if bull_count == n_ex:
+        sinyal    = "BULLISH_KONSENSUS"; skor_buy = 3; skor_sell = 0
+    elif bull_count >= n_ex*0.6:
+        sinyal    = "BULLISH_MAYORITAS"; skor_buy = 2; skor_sell = 0
+    elif bear_count == n_ex:
+        sinyal    = "BEARISH_KONSENSUS"; skor_buy = 0; skor_sell = 3
+    elif bear_count >= n_ex*0.6:
+        sinyal    = "BEARISH_MAYORITAS"; skor_buy = 0; skor_sell = 2
     else:
-        sinyal    = "NETRAL_MIXED"
-        skor_buy  = 0
-        skor_sell = 0
+        sinyal    = "NETRAL_MIXED";      skor_buy = 0; skor_sell = 0
 
     return {
-        "sinyal"        : sinyal,
-        "skor_buy"      : skor_buy,
-        "skor_sell"     : skor_sell,
-        "avg_imbalance" : round(avg_imbalance, 3),
-        "bullish_count" : bullish_count,
-        "bearish_count" : bearish_count,
-        "n_exchange"    : n_exchange,
-        "detail"        : f"CrossOB:{sinyal} ({bullish_count}B/{bearish_count}S/{n_exchange}ex)"
+        "sinyal"       : sinyal,
+        "skor_buy"     : skor_buy,
+        "skor_sell"    : skor_sell,
+        "avg_imbalance": round(avg_imb, 3),
+        "bullish_count": bull_count,
+        "bearish_count": bear_count,
+        "n_exchange"   : n_ex,
+        "detail"       : f"CrossOB:{sinyal} ({bull_count}B/{bear_count}S/{n_ex}ex)"
     }
 
 # ══════════════════════════════════════════════
-# ARBITRAGE SCANNER
+# ARBITRASE SCANNER
 # ══════════════════════════════════════════════
 
 def scan_arbitrase(binance_client, symbol):
-    """
-    Deteksi peluang arbitrase antar exchange.
-    Arbitrase = beli di exchange murah, jual di exchange mahal.
-
-    Return: dict dengan peluang arbitrase jika ada
-    """
+    """Deteksi peluang arbitrase antar exchange"""
     all_prices = get_all_prices(binance_client, symbol)
     if not all_prices or all_prices["agregat"]["n_exchange"] < 2:
         return {"ada_peluang": False, "detail": "Data tidak cukup"}
 
     per_ex  = all_prices["per_exchange"]
-    agregat = all_prices["agregat"]
+    harga_valid = {k: v for k,v in per_ex.items()
+                   if v.get("harga_usd",0) > 0}
 
-    # Cari exchange dengan harga terendah (beli di sini)
-    exchange_beli  = min(per_ex.keys(), key=lambda x: per_ex[x]["price"])
-    exchange_jual  = max(per_ex.keys(), key=lambda x: per_ex[x]["price"])
+    if len(harga_valid) < 2:
+        return {"ada_peluang": False, "detail": "Harga tidak valid"}
 
-    harga_beli     = per_ex[exchange_beli]["price"]
-    harga_jual     = per_ex[exchange_jual]["price"]
-    spread_pct     = ((harga_jual - harga_beli) / harga_beli) * 100
+    ex_beli  = min(harga_valid, key=lambda x: harga_valid[x]["harga_usd"])
+    ex_jual  = max(harga_valid, key=lambda x: harga_valid[x]["harga_usd"])
+    h_beli   = harga_valid[ex_beli]["harga_usd"]
+    h_jual   = harga_valid[ex_jual]["harga_usd"]
 
-    # Estimasi fee (rata-rata 0.1% per exchange × 2 transaksi)
-    total_fee_pct  = 0.2
-    # Fee transfer antar exchange (~$1 = ~0.1%)
-    transfer_fee   = 0.1
-    net_profit_pct = spread_pct - total_fee_pct - transfer_fee
-
-    ada_peluang = net_profit_pct > ARBI_THRESHOLD
+    spread   = ((h_jual - h_beli) / h_beli) * 100
+    fee      = 0.2 + 0.1   # Trading fee + transfer
+    net      = spread - fee
+    ada      = net > ARBI_THRESHOLD
 
     return {
-        "ada_peluang"   : ada_peluang,
-        "exchange_beli" : exchange_beli,
-        "exchange_jual" : exchange_jual,
-        "harga_beli"    : harga_beli,
-        "harga_jual"    : harga_jual,
-        "spread_pct"    : round(spread_pct, 4),
-        "net_profit_pct": round(net_profit_pct, 4),
-        "semua_harga"   : {ex: d["price"] for ex, d in per_ex.items()},
+        "ada_peluang"   : ada,
+        "exchange_beli" : ex_beli,
+        "exchange_jual" : ex_jual,
+        "harga_beli"    : h_beli,
+        "harga_jual"    : h_jual,
+        "spread_pct"    : round(spread, 4),
+        "net_profit_pct": round(net, 4),
+        "semua_harga"   : {ex: d["harga_usd"] for ex,d in harga_valid.items()},
         "detail"        : (
-            f"🔄 Arbitrase: Beli di {exchange_beli} ${harga_beli:,.4f} → "
-            f"Jual di {exchange_jual} ${harga_jual:,.4f} "
-            f"(Net: {net_profit_pct:+.3f}%)"
-            if ada_peluang else
-            f"Spread: {spread_pct:.3f}% (belum profitable)"
+            f"🔄 {ex_beli}→{ex_jual} "
+            f"${h_beli:,.4f}→${h_jual:,.4f} "
+            f"(Net: {net:+.3f}%)"
+            if ada else f"Spread: {spread:.3f}% (belum profitable)"
         )
     }
 
 # ══════════════════════════════════════════════
-# SMART ORDER ROUTING
-# ══════════════════════════════════════════════
-
-def get_best_exchange_beli(binance_client, symbol, qty_usdt):
-    """
-    Tentukan exchange terbaik untuk BUY.
-    Kriteria: harga terendah + cukup liquidity + API tersedia
-    """
-    all_prices = get_all_prices(binance_client, symbol)
-    if not all_prices:
-        return "binance"  # Default ke Binance
-
-    per_ex     = all_prices["per_exchange"]
-    kandidat   = []
-
-    for exchange, data in per_ex.items():
-        # Cek apakah API key tersedia untuk eksekusi
-        api_tersedia = {
-            "binance" : True,
-            "bybit"   : bool(BYBIT_KEY),
-            "okx"     : bool(OKX_KEY),
-            "coinbase": bool(COINBASE_KEY)
-        }.get(exchange, False)
-
-        if api_tersedia:
-            kandidat.append({
-                "exchange": exchange,
-                "price"   : data["price"],
-                "spread"  : data["ask"] - data["bid"]
-            })
-
-    if not kandidat:
-        return "binance"
-
-    # Pilih yang harganya paling murah (untuk beli)
-    terbaik = min(kandidat, key=lambda x: x["price"])
-    return terbaik["exchange"]
-
-def eksekusi_order_terbaik(binance_client, symbol, side,
-                           qty_usdt, kirim_telegram):
-    """
-    Eksekusi order di exchange dengan harga terbaik.
-    Untuk BUY: pilih exchange paling murah
-    Untuk SELL: pilih exchange paling mahal
-    """
-    all_prices = get_all_prices(binance_client, symbol)
-    if not all_prices:
-        return {"exchange": "binance", "status": "fallback"}
-
-    per_ex = all_prices["per_exchange"]
-
-    if side.upper() == "BUY":
-        exchange_terpilih = min(
-            [ex for ex in per_ex if _cek_api(ex)],
-            key=lambda x: per_ex[x]["price"],
-            default="binance"
-        )
-        harga_ref = per_ex[exchange_terpilih]["price"]
-    else:
-        exchange_terpilih = max(
-            [ex for ex in per_ex if _cek_api(ex)],
-            key=lambda x: per_ex[x]["price"],
-            default="binance"
-        )
-        harga_ref = per_ex[exchange_terpilih]["price"]
-
-    # Bandingkan dengan Binance
-    harga_binance = per_ex.get("binance", {}).get("price", harga_ref)
-    keuntungan    = abs(harga_ref - harga_binance) / harga_binance * 100
-
-    print(f"  🎯 Smart Route: {side} {symbol} di {exchange_terpilih} "
-          f"${harga_ref:,.4f} (vs Binance ${harga_binance:,.4f}, "
-          f"selisih {keuntungan:.3f}%)")
-
-    # Eksekusi di exchange terpilih
-    sym_map = SYMBOL_MAP.get(symbol, {})
-    result  = None
-
-    if exchange_terpilih == "bybit":
-        bybit_sym = sym_map.get("bybit", symbol)
-        result    = bybit_place_order(bybit_sym, side, qty_usdt)
-
-    elif exchange_terpilih == "okx":
-        okx_sym = sym_map.get("okx", symbol)
-        result  = okx_place_order(okx_sym, side, qty_usdt)
-
-    elif exchange_terpilih == "coinbase":
-        cb_sym = sym_map.get("coinbase", symbol)
-        result = coinbase_place_order(cb_sym, side, qty_usdt)
-
-    else:  # Binance (default)
-        result = {"exchange": "binance", "note": "handled by main bot"}
-
-    if keuntungan > 0.1:
-        kirim_telegram(
-            f"🎯 <b>Smart Routing - {symbol}</b>\n"
-            f"📊 Exchange terpilih: <b>{exchange_terpilih.upper()}</b>\n"
-            f"💰 Harga: ${harga_ref:,.4f} vs Binance ${harga_binance:,.4f}\n"
-            f"✅ Hemat: {keuntungan:.3f}%"
-        )
-
-    return {
-        "exchange": exchange_terpilih,
-        "harga"   : harga_ref,
-        "result"  : result
-    }
-
-def _cek_api(exchange):
-    """Cek apakah API key tersedia untuk exchange"""
-    return {
-        "binance" : True,
-        "bybit"   : bool(BYBIT_KEY),
-        "okx"     : bool(OKX_KEY),
-        "coinbase": bool(COINBASE_KEY)
-    }.get(exchange, False)
-
-# ══════════════════════════════════════════════
-# FUNGSI UTAMA: ANALISIS MULTI EXCHANGE
+# ANALISIS MULTI EXCHANGE
 # ══════════════════════════════════════════════
 
 def analisis_multi_exchange(binance_client, symbol):
     """
     Analisis lengkap dari semua exchange.
-    Dipanggil dari bot utama saat scan koin.
-
-    Return:
-        skor_buy     : int (0-5)
-        skor_sell    : int (0-5)
-        arbitrase    : dict
-        cross_ob     : dict
-        all_prices   : dict
-        summary      : str
-        detail       : list[str]
+    Dipanggil dari hitung_skor_koin().
     """
-    detail = []
+    detail   = []
+    skor_buy = skor_sell = 0
 
-    # 1. Ambil harga semua exchange
     all_prices = get_all_prices(binance_client, symbol)
+    cross_ob   = cross_orderbook_analysis(binance_client, symbol)
 
-    if not all_prices:
-        return _default_result()
+    if all_prices:
+        agr = all_prices["agregat"]
+        skor_buy  += cross_ob["skor_buy"]
+        skor_sell += cross_ob["skor_sell"]
 
-    agr = all_prices["agregat"]
+        if agr["n_exchange"] >= 3 and cross_ob["bullish_count"] >= 3:
+            skor_buy += 1; detail.append(f"🌐{agr['n_exchange']}ex bullish!")
+        if agr["spread_pct"] > 0.5:
+            detail.append(f"⚡Spread:{agr['spread_pct']:.2f}%")
+        detail.append(cross_ob["detail"])
 
-    # 2. Cross OB analysis
-    cross_ob = cross_orderbook_analysis(binance_client, symbol)
+    # Hyperliquid funding rate bonus signal
+    sym_map = SYMBOL_MAP.get(symbol, {})
+    hl_coin = sym_map.get("hl")
+    if hl_coin:
+        fr = hl_get_funding_rate(hl_coin)
+        if fr:
+            rate = fr["funding_rate"] * 100
+            if rate < -0.03:
+                skor_buy += 1; detail.append(f"💧HL Funding:{rate:.4f}%(bullish)")
+            elif rate > 0.08:
+                skor_sell += 1; detail.append(f"💧HL Funding:{rate:.4f}%(bearish)")
 
-    # 3. Arbitrase scan
     arbi = scan_arbitrase(binance_client, symbol)
-
-    # ── Hitung skor ──
-    skor_buy  = cross_ob["skor_buy"]
-    skor_sell = cross_ob["skor_sell"]
-
-    # Bonus jika banyak exchange konfirmasi
-    if agr["n_exchange"] >= 3:
-        if cross_ob["bullish_count"] >= 3:
-            skor_buy += 1
-            detail.append(f"🌐 {agr['n_exchange']} exchange bullish!")
-        elif cross_ob["bearish_count"] >= 3:
-            skor_sell += 1
-            detail.append(f"🌐 {agr['n_exchange']} exchange bearish!")
-
-    # Info spread harga antar exchange
-    if agr["spread_pct"] > 0.5:
-        detail.append(f"⚡ Spread tinggi: {agr['spread_pct']:.3f}%")
-    else:
-        detail.append(f"✅ Spread normal: {agr['spread_pct']:.3f}%")
-
-    # Info arbitrase
     if arbi["ada_peluang"]:
         detail.append(
-            f"🔄 Arbitrase: {arbi['exchange_beli']}→{arbi['exchange_jual']} "
-            f"({arbi['net_profit_pct']:+.3f}%)"
+            f"🔄Arbi:{arbi['exchange_beli']}→"
+            f"{arbi['exchange_jual']} "
+            f"({arbi['net_profit_pct']:+.2f}%)"
         )
 
-    detail.append(cross_ob["detail"])
-
-    harga_str = " | ".join([
-        f"{ex}: ${d['price']:,.2f}"
-        for ex, d in all_prices["per_exchange"].items()
-    ])
+    harga_str = ""
+    if all_prices:
+        harga_str = " | ".join([
+            f"{ex[:4].upper()}:${d['harga_usd']:,.2f}"
+            for ex,d in all_prices["per_exchange"].items()
+            if d.get("harga_usd",0) > 0
+        ])
 
     return {
-        "skor_buy"  : min(skor_buy, 5),
-        "skor_sell" : min(skor_sell, 5),
-        "cross_ob"  : cross_ob,
-        "arbitrase" : arbi,
+        "skor_buy" : min(skor_buy, 5),
+        "skor_sell": min(skor_sell, 5),
+        "cross_ob" : cross_ob,
+        "arbitrase": arbi,
         "all_prices": all_prices,
-        "detail"    : detail,
-        "summary"   : f"MultiEx:{cross_ob['sinyal']} | {harga_str}"
+        "detail"   : detail,
+        "summary"  : f"MultiEx:{cross_ob['sinyal']} | {harga_str}"
     }
+
+# ══════════════════════════════════════════════
+# CEK SALDO SEMUA EXCHANGE
+# ══════════════════════════════════════════════
 
 def cek_saldo_semua_exchange(binance_client):
     """Print saldo di semua exchange"""
     print("\n💰 Saldo Multi Exchange:")
+
     try:
         akun = binance_client.get_account()
         usdt = next((float(a["free"]) for a in akun["balances"]
                      if a["asset"] == "USDT"), 0)
-        print(f"  Binance  : ${usdt:,.2f}")
+        print(f"  Binance     : ${usdt:,.2f} USDT")
     except: pass
 
-    bybit_bal = bybit_get_balance()
-    print(f"  Bybit    : ${bybit_bal:,.2f}" if bybit_bal > 0
-          else "  Bybit    : (API key belum tersedia)")
+    # Indodax
+    if INDODAX_KEY:
+        bal = indodax_get_balance()
+        print(f"  Indodax     : Rp{bal['idr']:,.0f} "
+              f"(≈${bal['usd']:,.2f})")
+    else:
+        print("  Indodax     : (API key belum diisi)")
 
-    okx_bal = okx_get_balance()
-    print(f"  OKX      : ${okx_bal:,.2f}" if okx_bal > 0
-          else "  OKX      : (API key belum tersedia)")
+    # Tokocrypto
+    if TOKO_KEY:
+        bal = toko_get_balance()
+        print(f"  Tokocrypto  : ${bal:,.2f} USDT")
+    else:
+        print("  Tokocrypto  : (API key belum diisi)")
 
-    coinbase_bal = coinbase_get_balance()
-    print(f"  Coinbase : ${coinbase_bal:,.2f}" if coinbase_bal > 0
-          else "  Coinbase : (API key belum tersedia)")
+    # Hyperliquid
+    if HL_WALLET:
+        bal = hl_get_balance()
+        print(f"  Hyperliquid : ${bal:,.2f} USDC")
+        pos = hl_get_positions()
+        if pos:
+            print(f"  HL Positions: {len(pos)} posisi aktif")
+            for p in pos:
+                em = "📈" if p["size"] > 0 else "📉"
+                print(f"    {em} {p['coin']}: {p['size']} "
+                      f"@ ${p['entry_price']:,.2f} "
+                      f"PnL: ${p['unrealized']:,.2f}")
+    else:
+        print("  Hyperliquid : (Wallet address belum diisi)")
 
 def _default_cross_ob():
     return {
         "sinyal": "NETRAL", "skor_buy": 0, "skor_sell": 0,
         "avg_imbalance": 1.0, "bullish_count": 0, "bearish_count": 0,
-        "n_exchange": 0, "detail": "CrossOB: data tidak tersedia"
-    }
-
-def _default_result():
-    return {
-        "skor_buy": 0, "skor_sell": 0,
-        "cross_ob": _default_cross_ob(),
-        "arbitrase": {"ada_peluang": False},
-        "all_prices": None,
-        "detail": ["⚠️ Multi-exchange data tidak tersedia"],
-        "summary": "N/A"
+        "n_exchange": 0, "detail": "CrossOB: N/A"
     }
