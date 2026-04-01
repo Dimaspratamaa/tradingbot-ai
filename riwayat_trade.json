@@ -302,5 +302,14 @@
     "waktu_beli": "2026-03-26 03:42:20",
     "waktu_jual": "2026-03-26 12:10:36",
     "alasan": "SPOT_SL"
+  },
+  {
+    "symbol": "SHIBUSDT",
+    "harga_beli": 6.14e-06,
+    "harga_jual": 6.12e-06,
+    "profit_pct": -0.3257,
+    "waktu_beli": "2026-03-30 15:26:04",
+    "waktu_jual": "2026-03-30 19:16:53",
+    "alasan": "SPOT_TRAILING"
   }
 ]
