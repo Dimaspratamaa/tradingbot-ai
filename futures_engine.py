@@ -8,6 +8,16 @@ from binance.exceptions import BinanceAPIException
 import time
 import json
 import os
+import sys
+
+# Import paper_trading dengan path aman
+try:
+    from paper_trading import is_paper_mode, paper_buka_futures, paper_tutup_futures
+except ImportError:
+    # Fallback jika modul belum ada
+    def is_paper_mode(): return False
+    def paper_buka_futures(*a, **kw): return False
+    def paper_tutup_futures(*a, **kw): return False
 
 # ── KONFIGURASI FUTURES ───────────────────────
 LEVERAGE           = 5          # 5x leverage

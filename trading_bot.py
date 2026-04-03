@@ -75,27 +75,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 warnings.filterwarnings('ignore')
 
-# ── SSL BYPASS — untuk ISP yang blokir sertifikat Binance ──
-import ssl as _ssl
+# SSL normal — Railway server tidak perlu bypass
 import urllib3 as _urllib3
 _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
-try:
-    _ssl._create_default_https_context = _ssl._create_unverified_context
-except Exception:
-    pass
-
-# Patch requests global agar semua call pakai verify=False
-import requests as _req_patch
-_orig_get  = _req_patch.get
-_orig_post = _req_patch.post
-def _patched_get(url, **kw):
-    kw.setdefault('verify', False)
-    return _orig_get(url, **kw)
-def _patched_post(url, **kw):
-    kw.setdefault('verify', False)
-    return _orig_post(url, **kw)
-_req_patch.get  = _patched_get
-_req_patch.post = _patched_post
 
 # ── KONFIGURASI ───────────────────────────────
 # ── Load .env jika ada (development lokal) ────
@@ -112,8 +94,12 @@ if _env_file.exists():
 # Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",           "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID",         "8604266478")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
+
+if not TG_TOKEN or not TG_CHAT_ID:
+    print("⚠️  TG_TOKEN / TG_CHAT_ID belum diisi di .env atau Railway Variables!")
+    print("   Bot berjalan tapi notifikasi Telegram tidak aktif.")
 
 if not API_KEY or not API_SECRET:
     print("⛔ BINANCE_API_KEY / BINANCE_API_SECRET belum diisi di .env!")
@@ -198,62 +184,61 @@ SL_COOLDOWN_JAM  = 4    # Block entry 4 jam setelah kena SL di koin sama
 
 def buat_client():
     """
-    Buat Binance client dengan header browser asli.
-    Cloudflare block terjadi karena header bot terdeteksi.
-    Solusi: pakai User-Agent browser nyata + header lengkap.
+    Buat Binance client.
+    Di Railway: koneksi langsung tanpa SSL bypass (server luar negeri).
+    Di lokal  : otomatis deteksi dan handle Cloudflare block.
     """
-    import requests
     from binance.client import Client as _Client
 
-    # Header browser nyata — hindari Cloudflare detection
+    # Cek apakah di Railway (ada env variable RAILWAY_ENVIRONMENT)
+    is_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT") or
+                      os.environ.get("RAILWAY_PROJECT_ID"))
+
+    if is_railway:
+        # Railway — koneksi normal, tidak perlu workaround
+        print("  ☁️  Mode: Railway Cloud")
+        client = _Client(API_KEY, API_SECRET, testnet=False)
+        client.ping()
+        print("  ✅ Binance terkoneksi di Railway!")
+        return client
+
+    # Lokal — pakai header browser untuk bypass Cloudflare
+    print("  💻 Mode: Lokal")
     BROWSER_HEADERS = {
-        "User-Agent"      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/122.0.0.0 Safari/537.36",
-        "Accept"          : "application/json, text/plain, */*",
-        "Accept-Language" : "en-US,en;q=0.9",
-        "Accept-Encoding" : "gzip, deflate, br",
-        "Connection"      : "keep-alive",
-        "Cache-Control"   : "no-cache",
+        "User-Agent"     : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/122.0.0.0 Safari/537.36",
+        "Accept"         : "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control"  : "no-cache",
     }
 
-    # Patch session Binance agar pakai header browser
     class BrowserClient(_Client):
         def _init_session(self):
             sess = super()._init_session()
             sess.headers.update(BROWSER_HEADERS)
-            sess.verify = True  # SSL verify ON — lebih aman dari Cloudflare
             return sess
 
-    # Cek proxy dari environment variable
     proxies = {}
     proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
-        print(f"  🔀 Proxy aktif: {proxy_url}")
+        print(f"  🔀 Proxy: {proxy_url}")
 
     try:
-        client = BrowserClient(
-            API_KEY, API_SECRET,
-            testnet=False,
-            requests_params={"proxies": proxies} if proxies else {}
-        )
-        client.ping()
-        print("  ✅ Binance terkoneksi (browser mode)")
-        return client
+        c = BrowserClient(API_KEY, API_SECRET, testnet=False,
+                          requests_params={"proxies": proxies} if proxies else {})
+        c.ping()
+        print("  ✅ Binance terkoneksi (lokal)")
+        return c
     except Exception as e:
         err = str(e)
-        if "Just a moment" in err or "Cloudflare" in err or "challenge" in err:
-            print("  ⚠️  Cloudflare block terdeteksi!")
-            print("  💡 Solusi: Deploy ke Railway/VPS atau gunakan VPN")
-            print("  💡 Bot tetap berjalan tapi data mungkin terbatas")
+        if "Just a moment" in err or "challenge" in err:
+            print("  🚫 Cloudflare block — gunakan VPN atau deploy ke Railway")
+            print("  ⚠️  Bot berjalan tapi koneksi Binance tidak stabil")
         else:
-            print(f"  ⚠️  Binance connect error: {err[:100]}")
-        # Return client tanpa ping — bot tetap coba jalan
-        try:
-            return BrowserClient(API_KEY, API_SECRET, testnet=False)
-        except Exception:
-            return _Client(API_KEY, API_SECRET, testnet=False)
+            print(f"  ⚠️  Connect error: {err[:80]}")
+        return _Client(API_KEY, API_SECRET, testnet=False)
 
 client = buat_client()
 bayes  = BayesianTradingModel()
@@ -270,13 +255,32 @@ signal.signal(signal.SIGINT,  handle_shutdown)
 
 # ── FUNGSI DASAR ──────────────────────────────
 def kirim_telegram(pesan, retry=3):
+    # Cek apakah credentials tersedia
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print(f"  ⚠️  [TELEGRAM] Token/ChatID kosong — pesan tidak terkirim")
+        return False
+
     for attempt in range(retry):
         try:
             url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
             data = {"chat_id": TG_CHAT_ID, "text": pesan, "parse_mode": "HTML"}
-            if requests.post(url, data=data, timeout=15).status_code == 200:
+            resp = requests.post(url, data=data, timeout=15)
+            if resp.status_code == 200:
                 return True
-        except:
+            elif resp.status_code == 401:
+                print(f"  ❌ [TELEGRAM] Token tidak valid! Cek TG_TOKEN di .env")
+                return False
+            elif resp.status_code == 400:
+                err = resp.json().get("description", "")
+                print(f"  ❌ [TELEGRAM] Bad request: {err}")
+                return False
+            else:
+                print(f"  ⚠️  [TELEGRAM] Status {resp.status_code}, retry {attempt+1}/{retry}")
+        except requests.exceptions.ConnectionError:
+            print(f"  ⚠️  [TELEGRAM] Koneksi gagal (attempt {attempt+1}/{retry})")
+            if attempt < retry - 1: time.sleep(5)
+        except Exception as e:
+            print(f"  ⚠️  [TELEGRAM] Error: {e}")
             if attempt < retry - 1: time.sleep(5)
     return False
 
