@@ -129,38 +129,20 @@ def buka_long(client, symbol, harga, atr, skor, detail_str, kirim_telegram):
 
     print(f"\n  ⚡ [{symbol}] FUTURES LONG! Qty:{qty} Lev:{LEVERAGE}x")
 
-    try:
-        # Buka posisi LONG
-        client.futures_create_order(
-            symbol=symbol,
-            side="BUY",
-            type="MARKET",
-            quantity=qty
-        )
-
-        # Set Take Profit order
-        client.futures_create_order(
-            symbol=symbol,
-            side="SELL",
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round(tp, 4),
-            closePosition=True,
-            timeInForce="GTE_GTC"
-        )
-
-        # Set Stop Loss order
-        client.futures_create_order(
-            symbol=symbol,
-            side="SELL",
-            type="STOP_MARKET",
-            stopPrice=round(sl, 4),
-            closePosition=True,
-            timeInForce="GTE_GTC"
-        )
-
-    except Exception as e:
-        print(f"  ⚠️  Gagal buka LONG {symbol}: {e}")
-        return False
+    if is_paper_mode():
+        ok = paper_buka_futures(symbol, "LONG", harga, qty, sl, tp, LEVERAGE, detail_str)
+        if not ok:
+            return False
+    else:
+        try:
+            client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+            client.futures_create_order(symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
+                stopPrice=round(tp, 4), closePosition=True, timeInForce="GTE_GTC")
+            client.futures_create_order(symbol=symbol, side="SELL", type="STOP_MARKET",
+                stopPrice=round(sl, 4), closePosition=True, timeInForce="GTE_GTC")
+        except Exception as e:
+            print(f"  ⚠️  Gagal buka LONG {symbol}: {e}")
+            return False
 
     posisi_futures[symbol] = {
         "aktif"          : True,
@@ -215,38 +197,20 @@ def buka_short(client, symbol, harga, atr, skor, detail_str, kirim_telegram):
 
     print(f"\n  📉 [{symbol}] FUTURES SHORT! Qty:{qty} Lev:{LEVERAGE}x")
 
-    try:
-        # Buka posisi SHORT
-        client.futures_create_order(
-            symbol=symbol,
-            side="SELL",
-            type="MARKET",
-            quantity=qty
-        )
-
-        # Set Take Profit
-        client.futures_create_order(
-            symbol=symbol,
-            side="BUY",
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=round(tp, 4),
-            closePosition=True,
-            timeInForce="GTE_GTC"
-        )
-
-        # Set Stop Loss
-        client.futures_create_order(
-            symbol=symbol,
-            side="BUY",
-            type="STOP_MARKET",
-            stopPrice=round(sl, 4),
-            closePosition=True,
-            timeInForce="GTE_GTC"
-        )
-
-    except Exception as e:
-        print(f"  ⚠️  Gagal buka SHORT {symbol}: {e}")
-        return False
+    if is_paper_mode():
+        ok = paper_buka_futures(symbol, "SHORT", harga, qty, sl, tp, LEVERAGE, detail_str)
+        if not ok:
+            return False
+    else:
+        try:
+            client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
+            client.futures_create_order(symbol=symbol, side="BUY", type="TAKE_PROFIT_MARKET",
+                stopPrice=round(tp, 4), closePosition=True, timeInForce="GTE_GTC")
+            client.futures_create_order(symbol=symbol, side="BUY", type="STOP_MARKET",
+                stopPrice=round(sl, 4), closePosition=True, timeInForce="GTE_GTC")
+        except Exception as e:
+            print(f"  ⚠️  Gagal buka SHORT {symbol}: {e}")
+            return False
 
     posisi_futures[symbol] = {
         "aktif"         : True,

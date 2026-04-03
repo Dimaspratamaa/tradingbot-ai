@@ -1,163 +1,181 @@
 # ============================================
-# TRAINING MODEL MACHINE LEARNING
-# Algoritma : Random Forest Classifier
+# TRAIN MODEL v2.0 — Quant Feature Edition
+# Upgrade dari 14 fitur → 85+ fitur
+# Algoritma: Random Forest (siap upgrade ke XGBoost di Phase 3)
 # ============================================
+
+import os, sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+
+_env = pathlib.Path(__file__).parent / ".env"
+if _env.exists():
+    for _l in _env.read_text().splitlines():
+        _l = _l.strip()
+        if _l and not _l.startswith("#") and "=" in _l:
+            _k, _v = _l.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+import ssl, urllib3
+urllib3.disable_warnings()
+ssl._create_default_https_context = ssl._create_unverified_context
 
 from binance.client import Client
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-from sklearn.preprocessing import StandardScaler
-import joblib
-import warnings
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.preprocessing import RobustScaler
+from sklearn.utils.class_weight import compute_class_weight
+import joblib, json, warnings
 warnings.filterwarnings('ignore')
 
-# ── KONFIGURASI ───────────────────────────────
-API_KEY    = "ISI_API_KEY_TESTNET_KAMU"
-API_SECRET = "ISI_API_SECRET_TESTNET_KAMU"
+from feature_engineering import compute_all_features, get_feature_groups
 
-SYMBOL   = "BTCUSDT"
-INTERVAL = Client.KLINE_INTERVAL_1HOUR
-LIMIT    = 1000  # Ambil 1000 candle untuk training
+API_KEY    = os.environ.get("BINANCE_API_KEY", "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
+API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
+SYMBOLS    = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+LIMIT      = 1500
+FORWARD    = 3
+TARGET_PCT = 0.008
 
-client = Client(API_KEY, API_SECRET, testnet=True)
+print("=" * 60)
+print("   TRAINING MODEL v2.0 — 85+ QUANT FEATURES")
+print("=" * 60)
 
-print("=" * 55)
-print("   TRAINING MODEL MACHINE LEARNING")
-print("   Algoritma : Random Forest Classifier")
-print("=" * 55)
+try:
+    client = Client(API_KEY, API_SECRET, testnet=False,
+                    requests_params={"verify": False})
+    client.ping()
+    print("Binance terkoneksi")
+except Exception as e:
+    print(f"Binance error: {e}"); sys.exit(1)
 
-# ── STEP 1: AMBIL DATA HISTORIS ───────────────
-print("\n📥 Mengambil data historis dari Binance...")
-klines = client.get_klines(symbol=SYMBOL, interval=INTERVAL, limit=LIMIT)
-df = pd.DataFrame(klines, columns=[
-    'time','open','high','low','close','volume',
-    'close_time','quote_vol','trades',
-    'taker_base','taker_quote','ignore'
-])
-for col in ['open','high','low','close','volume']:
-    df[col] = df[col].astype(float)
+def get_df(symbol, interval, limit):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=[
+        "time","open","high","low","close","volume",
+        "close_time","quote_vol","trades","taker_base","taker_quote","ignore"])
+    for col in ["open","high","low","close","volume"]:
+        df[col] = df[col].astype(float)
+    df["time"] = pd.to_datetime(df["time"], unit="ms")
+    return df.set_index("time")
 
-print(f"✅ Data berhasil diambil: {len(df)} candle")
+print(f"\nMengambil data {len(SYMBOLS)} simbol...")
+dfs_1h, dfs_4h, dfs_1d = {}, {}, {}
+for sym in SYMBOLS:
+    try:
+        dfs_1h[sym] = get_df(sym, Client.KLINE_INTERVAL_1HOUR, LIMIT)
+        dfs_4h[sym] = get_df(sym, Client.KLINE_INTERVAL_4HOUR, 400)
+        dfs_1d[sym] = get_df(sym, Client.KLINE_INTERVAL_1DAY, 200)
+        print(f"  OK {sym}: {len(dfs_1h[sym])} candle")
+    except Exception as e:
+        print(f"  ERR {sym}: {e}")
 
-# ── STEP 2: BUAT FITUR (FEATURES) ────────────
-print("\n🔧 Membuat fitur untuk model ML...")
+print(f"\nMembangun feature matrix...")
+all_rows = []
+WINDOW = 100
 
-# RSI
-delta = df['close'].diff()
-gain  = delta.where(delta > 0, 0).rolling(14).mean()
-loss  = (-delta.where(delta < 0, 0)).rolling(14).mean()
-df['rsi'] = 100 - (100 / (1 + gain / loss))
+for sym in SYMBOLS:
+    if sym not in dfs_1h: continue
+    df1h = dfs_1h[sym]
+    df4h = dfs_4h.get(sym)
+    df1d = dfs_1d.get(sym)
+    n_rows = 0
+    for i in range(WINDOW, len(df1h) - FORWARD):
+        w1h = df1h.iloc[max(0, i-250):i+1]
+        w4h = df4h.iloc[:max(1, i//4)] if df4h is not None else None
+        w1d = df1d.iloc[:max(1, i//24)] if df1d is not None else None
+        try:
+            feat_dict, _ = compute_all_features(w1h, w4h, w1d)
+        except Exception:
+            continue
+        if not feat_dict: continue
+        future  = df1h["close"].iloc[i + FORWARD]
+        current = df1h["close"].iloc[i]
+        feat_dict["_target"] = int((future / current - 1) > TARGET_PCT)
+        feat_dict["_symbol"] = sym
+        all_rows.append(feat_dict)
+        n_rows += 1
+    print(f"  {sym}: {n_rows} sampel")
 
-# MACD
-ema12 = df['close'].ewm(span=12, adjust=False).mean()
-ema26 = df['close'].ewm(span=26, adjust=False).mean()
-df['macd']        = ema12 - ema26
-df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-df['macd_hist']   = df['macd'] - df['macd_signal']
+df_feat = pd.DataFrame(all_rows)
+print(f"\nTotal: {len(df_feat)} sampel | {len(df_feat.columns)-2} fitur")
+print(f"Label BUY(1): {df_feat['_target'].sum()} | HOLD(0): {(df_feat['_target']==0).sum()}")
 
-# Bollinger Bands
-sma20       = df['close'].rolling(20).mean()
-std20       = df['close'].rolling(20).std()
-df['bb_upper'] = sma20 + (std20 * 2)
-df['bb_lower'] = sma20 - (std20 * 2)
-df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma20
-df['bb_pos']   = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+feature_cols = [c for c in df_feat.columns if not c.startswith("_")]
+X_raw = df_feat[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+y     = df_feat["_target"]
 
-# ATR
-tr = pd.concat([
-    df['high'] - df['low'],
-    (df['high'] - df['close'].shift()).abs(),
-    (df['low']  - df['close'].shift()).abs()
-], axis=1).max(axis=1)
-df['atr'] = tr.rolling(14).mean()
-df['atr_pct'] = df['atr'] / df['close'] * 100
+# Filter low-variance
+low_var = X_raw.columns[X_raw.std() < 0.001].tolist()
+X_raw   = X_raw.drop(columns=low_var)
 
-# Volume
-df['vol_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
+# Filter high-correlation
+corr = X_raw.corr().abs()
+upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+high_corr = [col for col in upper.columns if any(upper[col] > 0.97)]
+X_raw = X_raw.drop(columns=high_corr)
 
-# EMA
-df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-df['ema_diff'] = (df['ema20'] - df['ema50']) / df['close'] * 100
+feature_names = X_raw.columns.tolist()
+print(f"Fitur final setelah filter: {len(feature_names)}")
 
-# Price momentum
-df['momentum_3']  = df['close'].pct_change(3) * 100
-df['momentum_7']  = df['close'].pct_change(7) * 100
-df['momentum_14'] = df['close'].pct_change(14) * 100
+print(f"\nWalk-forward validation (5 fold)...")
+X    = X_raw.values
+tscv = TimeSeriesSplit(n_splits=5)
+scores_acc, scores_auc = [], []
 
-# Candle pattern
-df['candle_body'] = (df['close'] - df['open']).abs() / df['close'] * 100
-df['candle_dir']  = (df['close'] > df['open']).astype(int)
+for fold, (tr_idx, te_idx) in enumerate(tscv.split(X), 1):
+    X_tr, X_te = X[tr_idx], X[te_idx]
+    y_tr, y_te = y.values[tr_idx], y.values[te_idx]
+    sc = RobustScaler()
+    X_tr_s = sc.fit_transform(X_tr)
+    X_te_s = sc.transform(X_te)
+    cw = compute_class_weight("balanced", classes=np.array([0,1]), y=y_tr)
+    m  = RandomForestClassifier(n_estimators=300, max_depth=12,
+             min_samples_split=10, min_samples_leaf=5,
+             max_features="sqrt", class_weight={0:cw[0],1:cw[1]},
+             random_state=42, n_jobs=-1)
+    m.fit(X_tr_s, y_tr)
+    acc = accuracy_score(y_te, m.predict(X_te_s))
+    auc = roc_auc_score(y_te, m.predict_proba(X_te_s)[:,1])
+    scores_acc.append(acc); scores_auc.append(auc)
+    print(f"  Fold {fold}: Acc={acc:.3f} | AUC={auc:.3f}")
 
-# ── STEP 3: BUAT LABEL (TARGET) ───────────────
-# Label: 1 = harga naik > 1% dalam 3 candle ke depan
-#         0 = harga tidak naik / turun
-future_return    = df['close'].shift(-3) / df['close'] - 1
-df['target']     = (future_return > 0.01).astype(int)
+print(f"\n  Mean Acc : {np.mean(scores_acc):.3f} +/- {np.std(scores_acc):.3f}")
+print(f"  Mean AUC : {np.mean(scores_auc):.3f} +/- {np.std(scores_auc):.3f}")
 
-# ── STEP 4: SIAPKAN DATA TRAINING ─────────────
-features = [
-    'rsi', 'macd', 'macd_signal', 'macd_hist',
-    'bb_width', 'bb_pos', 'atr_pct', 'vol_ratio',
-    'ema_diff', 'momentum_3', 'momentum_7', 'momentum_14',
-    'candle_body', 'candle_dir'
-]
+print(f"\nTraining model final...")
+scaler_final = RobustScaler()
+X_scaled     = scaler_final.fit_transform(X)
+cw_all       = compute_class_weight("balanced", classes=np.array([0,1]), y=y.values)
+model_final  = RandomForestClassifier(
+    n_estimators=500, max_depth=15, min_samples_split=8,
+    min_samples_leaf=4, max_features="sqrt",
+    class_weight={0:cw_all[0],1:cw_all[1]},
+    random_state=42, n_jobs=-1)
+model_final.fit(X_scaled, y)
 
-df = df.dropna()
-X  = df[features]
-y  = df['target']
+print("\nTop 15 fitur terpenting:")
+importances = pd.Series(model_final.feature_importances_, index=feature_names)
+groups = get_feature_groups()
+for feat, imp in importances.nlargest(15).items():
+    cat = next((c for c, fl in groups.items() if feat in fl), "other")
+    print(f"  {feat:25} [{cat:10}] {imp:.4f}")
 
-print(f"✅ Fitur dibuat: {len(features)} fitur")
-print(f"   Data training: {len(X)} sampel")
-print(f"   Label BUY (1): {y.sum()} | Label HOLD (0): {(y==0).sum()}")
+joblib.dump(model_final,   "model_ml.pkl")
+joblib.dump(scaler_final,  "scaler_ml.pkl")
+joblib.dump(feature_names, "features_ml.pkl")
+meta = {"versi":"2.0-quant","n_fitur":len(feature_names),
+        "n_sampel":len(X),"symbols":SYMBOLS,
+        "mean_acc":round(float(np.mean(scores_acc)),4),
+        "mean_auc":round(float(np.mean(scores_auc)),4),
+        "feature_names":feature_names}
+with open("model_meta.json","w") as f:
+    json.dump(meta, f, indent=2)
 
-# ── STEP 5: SPLIT DATA ────────────────────────
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, shuffle=False
-)
-
-# ── STEP 6: NORMALISASI ───────────────────────
-scaler  = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_test  = scaler.transform(X_test)
-
-# ── STEP 7: TRAINING MODEL ────────────────────
-print("\n🤖 Training model Random Forest...")
-model = RandomForestClassifier(
-    n_estimators=200,
-    max_depth=10,
-    min_samples_split=5,
-    min_samples_leaf=2,
-    random_state=42,
-    n_jobs=-1
-)
-model.fit(X_train, y_train)
-print("✅ Training selesai!")
-
-# ── STEP 8: EVALUASI MODEL ────────────────────
-y_pred   = model.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
-
-print(f"\n📊 HASIL EVALUASI MODEL:")
-print(f"   Akurasi : {accuracy*100:.2f}%")
-print(f"\n{classification_report(y_test, y_pred, target_names=['HOLD','BUY'])}")
-
-# Feature importance
-importances = pd.Series(
-    model.feature_importances_, index=features
-).sort_values(ascending=False)
-print("🔍 Feature Importance (Top 5):")
-for feat, imp in importances.head(5).items():
-    print(f"   {feat:20} : {imp:.4f}")
-
-# ── STEP 9: SIMPAN MODEL ──────────────────────
-joblib.dump(model,  "model_ml.pkl")
-joblib.dump(scaler, "scaler_ml.pkl")
-joblib.dump(features, "features_ml.pkl")
-print("\n✅ Model disimpan: model_ml.pkl")
-print("✅ Scaler disimpan: scaler_ml.pkl")
-print("✅ Features disimpan: features_ml.pkl")
-print("\n🎯 Sekarang jalankan: python trading_bot.py")
+print(f"\n{'='*60}")
+print(f"  Model disimpan: model_ml.pkl ({len(feature_names)} fitur)")
+print(f"  AUC: {np.mean(scores_auc):.4f}")
+print(f"  Jalankan: python trading_bot.py")
+print(f"{'='*60}")

@@ -1,125 +1,151 @@
 # ============================================
-# SENTIMENT ANALYZER v1.0
-# Sumber: Reddit (public API) + CryptoPanic
-# + Fear & Greed Index + Google Trends proxy
+# SENTIMENT ANALYZER v2.0
+# Sumber utama: CryptoPanic + Fear & Greed Index
+# Reddit DINONAKTIFKAN — SSL block di semua env non-browser
 # ============================================
 
 import requests
+import ssl as _ssl_patch
+import urllib3 as _urllib3_patch
+_urllib3_patch.disable_warnings(_urllib3_patch.exceptions.InsecureRequestWarning)
+try:
+    _ssl_patch._create_default_https_context = _ssl_patch._create_unverified_context
+except Exception:
+    pass
+
 import time
 import json
 from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ── KONFIGURASI ───────────────────────────────
-REDDIT_BASE    = "https://www.reddit.com"
-SUBREDDITS     = ["cryptocurrency", "bitcoin", "ethfinance",
-                  "solana", "cryptomarkets", "altcoin"]
-POSTS_LIMIT    = 25    # Post per subreddit
+CRYPTOPANIC_BASE = "https://cryptopanic.com/api/free/v1/posts/"
+POSTS_LIMIT      = 30
 
-# Keyword sentiment
-BULLISH_WORDS  = [
+# Keyword sentimen
+BULLISH_WORDS = [
     "bullish", "moon", "pump", "buy", "long", "breakout",
     "ath", "accumulate", "undervalued", "support", "bounce",
     "adoption", "bullrun", "surge", "rally", "gain", "profit",
-    "hold", "hodl", "green", "up", "positive", "strong"
+    "hold", "hodl", "green", "up", "positive", "strong", "soar",
+    "rise", "recover", "uptrend", "breakout", "outperform"
 ]
-BEARISH_WORDS  = [
+BEARISH_WORDS = [
     "bearish", "dump", "sell", "short", "crash", "bear",
     "rekt", "loss", "scam", "fud", "overvalued", "resistance",
     "breakdown", "correction", "drop", "fall", "red", "down",
-    "negative", "weak", "panic", "fear", "bubble", "warning"
+    "negative", "weak", "panic", "fear", "bubble", "warning",
+    "hack", "ban", "regulation", "crackdown", "liquidation"
 ]
 
 # Cache
 _sentiment_cache = {"data": None, "waktu": 0, "ttl": 1800}  # 30 menit
 
 # ══════════════════════════════════════════════
-# 1. REDDIT SENTIMENT
+# HELPER
 # ══════════════════════════════════════════════
 
-def get_reddit_sentiment(subreddit="cryptocurrency", limit=25):
+def _analisis_teks_sentimen(teks_list):
+    """Analisis sentimen dari list teks, return rata skor."""
+    skor_total = 0
+    n = 0
+    for teks in teks_list:
+        t    = teks.lower()
+        bull = sum(1 for w in BULLISH_WORDS if w in t)
+        bear = sum(1 for w in BEARISH_WORDS if w in t)
+        skor_total += (bull - bear)
+        n += 1
+    return skor_total / max(n, 1)
+
+# ══════════════════════════════════════════════
+# 1. CRYPTOPANIC SENTIMENT (sumber utama)
+# ══════════════════════════════════════════════
+
+def get_cryptopanic_sentiment():
     """
-    Ambil post terbaru dari subreddit dan analisis sentimen.
-    Menggunakan public Reddit JSON API (tanpa API key).
+    Ambil sentimen dari CryptoPanic.
+    Hanya coba filter 'hot' untuk hemat waktu.
     """
     try:
-        url     = f"{REDDIT_BASE}/r/{subreddit}/hot.json?limit={limit}"
-        headers = {"User-Agent": "TradingBot/1.0"}
-        resp    = requests.get(url, headers=headers, timeout=10)
-
+        url  = f"{CRYPTOPANIC_BASE}?public=true&kind=news&filter=hot"
+        hdrs = {"User-Agent": "Mozilla/5.0 TradingBot/2.0"}
+        resp = requests.get(url, headers=hdrs, timeout=8, verify=True)
         if resp.status_code != 200:
             return None
-
-        data  = resp.json()
-        posts = data.get("data", {}).get("children", [])
-
-        skor_total = 0
-        n_post     = 0
-        detail     = []
-
-        for post in posts:
-            p     = post.get("data", {})
-            title = (p.get("title", "") + " " +
-                     p.get("selftext", "")[:200]).lower()
-            score = p.get("score", 0)
-            upvote_ratio = p.get("upvote_ratio", 0.5)
-
-            # Hitung sentimen teks
-            bull = sum(1 for w in BULLISH_WORDS if w in title)
-            bear = sum(1 for w in BEARISH_WORDS if w in title)
-            net  = bull - bear
-
-            # Weight by upvotes
-            bobot  = min(score / 1000, 3.0)  # Max bobot 3x
-            skor_w = net * (1 + bobot) * upvote_ratio
-
-            skor_total += skor_w
-            n_post     += 1
-
-            if abs(net) >= 2 and score > 100:
-                detail.append({
-                    "judul" : p.get("title", "")[:60],
-                    "skor"  : round(skor_w, 2),
-                    "upvote": score
-                })
-
-        rata = skor_total / max(n_post, 1)
-
+        data    = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return None
+        all_teks = [r.get("title","") for r in results[:POSTS_LIMIT] if r.get("title")]
+        if not all_teks:
+            return None
+        rata = _analisis_teks_sentimen(all_teks)
         return {
-            "subreddit": subreddit,
-            "n_post"   : n_post,
-            "rata_skor": round(rata, 3),
-            "skor_total": round(skor_total, 2),
-            "top_posts": sorted(detail,
-                key=lambda x: abs(x["skor"]), reverse=True)[:3]
+            "sumber"    : "cryptopanic",
+            "n_berita"  : len(all_teks),
+            "rata_skor" : round(rata, 3),
+            "skor_total": round(rata * len(all_teks), 2),
         }
-
     except Exception as e:
-        print(f"  ⚠️  Reddit {subreddit} error: {e}")
+        print(f"  ⚠️  CryptoPanic error: {e}")
         return None
 
-def get_all_reddit_sentiment():
-    """Ambil sentimen dari semua subreddit yang dikonfigurasi"""
-    hasil_semua = []
-    skor_gabung = 0
-
-    for sub in SUBREDDITS:
-        hasil = get_reddit_sentiment(sub, POSTS_LIMIT)
-        if hasil:
-            hasil_semua.append(hasil)
-            skor_gabung += hasil["rata_skor"]
-        time.sleep(1)  # Rate limit Reddit
-
-    if not hasil_semua:
+def get_messari_sentiment():
+    """
+    Fallback: ambil berita dari Messari public API (tanpa key).
+    Endpoint ini gratis dan umumnya tidak di-block.
+    """
+    try:
+        url  = "https://data.messari.io/api/v1/news?limit=20"
+        hdrs = {"User-Agent": "Mozilla/5.0 TradingBot/2.0"}
+        resp = requests.get(url, headers=hdrs, timeout=8, verify=True)
+        if resp.status_code != 200:
+            return None
+        data    = resp.json()
+        results = data.get("data", [])
+        if not results:
+            return None
+        all_teks = [r.get("title","") for r in results if r.get("title")]
+        if not all_teks:
+            return None
+        rata = _analisis_teks_sentimen(all_teks)
+        return {
+            "sumber"    : "messari",
+            "n_berita"  : len(all_teks),
+            "rata_skor" : round(rata, 3),
+            "skor_total": round(rata * len(all_teks), 2),
+        }
+    except Exception as e:
+        print(f"  ⚠️  Messari error: {e}")
         return None
 
-    rata_gabung = skor_gabung / len(hasil_semua)
+def get_all_news_sentiment():
+    """
+    Ambil sentimen berita. Urutan prioritas:
+    1. CryptoPanic (utama)
+    2. Messari (fallback jika CryptoPanic gagal)
+    3. Return None jika keduanya gagal (tidak crash)
+    """
+    # Coba CryptoPanic dulu
+    print("  📰 Mengambil berita dari CryptoPanic...")
+    hasil = get_cryptopanic_sentiment()
+    if hasil:
+        print(f"  ✅ CryptoPanic: {hasil['n_berita']} berita | skor: {hasil['rata_skor']:+.3f}")
+        return {"subreddits": [hasil], "rata_gabung": hasil["rata_skor"], "n_subreddit": 1}
 
-    return {
-        "subreddits" : hasil_semua,
-        "rata_gabung": round(rata_gabung, 3),
-        "n_subreddit": len(hasil_semua)
-    }
+    # Fallback ke Messari
+    print("  📰 CryptoPanic gagal → coba Messari...")
+    hasil = get_messari_sentiment()
+    if hasil:
+        print(f"  ✅ Messari: {hasil['n_berita']} berita | skor: {hasil['rata_skor']:+.3f}")
+        return {"subreddits": [hasil], "rata_gabung": hasil["rata_skor"], "n_subreddit": 1}
+
+    # Semua gagal — lanjutkan tanpa sentimen berita (tidak crash bot)
+    print("  ⚠️  Semua sumber berita gagal — pakai sentimen netral")
+    return {"subreddits": [], "rata_gabung": 0.0, "n_subreddit": 0}
+
+# Alias kompatibilitas — kode lama yang panggil get_all_reddit_sentiment tetap bekerja
+get_all_reddit_sentiment = get_all_news_sentiment
 
 # ══════════════════════════════════════════════
 # 2. FEAR & GREED INDEX
@@ -146,10 +172,9 @@ def get_fear_greed():
         prev_val = int(previous["value"])
         perubahan = nilai - prev_val
 
-        # Tentukan sinyal
         if nilai >= 75:
             sinyal    = "EXTREME_GREED"
-            skor_sell = 2  # Overbought → bearish
+            skor_sell = 2
             skor_buy  = 0
         elif nilai >= 60:
             sinyal    = "GREED"
@@ -161,11 +186,11 @@ def get_fear_greed():
             skor_buy  = 0
         elif nilai >= 25:
             sinyal    = "FEAR"
-            skor_buy  = 1  # Oversold → bullish
+            skor_buy  = 1
             skor_sell = 0
         else:
             sinyal    = "EXTREME_FEAR"
-            skor_buy  = 2  # Sangat oversold → beli
+            skor_buy  = 2
             skor_sell = 0
 
         return {
@@ -188,26 +213,25 @@ def get_fear_greed():
 
 def get_market_sentiment():
     """
-    Fungsi utama — gabungkan semua sumber sentimen.
+    Fungsi utama — gabungkan CryptoPanic + Fear & Greed.
 
     Return dict:
         skor_buy     : int (0-4)
         skor_sell    : int (0-4)
         sentiment    : str
         fear_greed   : dict
-        reddit       : dict
+        reddit       : dict  (isi dari CryptoPanic, nama dipertahankan untuk kompatibilitas)
         detail       : list[str]
         summary      : str
     """
     global _sentiment_cache
     sekarang = time.time()
 
-    # Cek cache
     if (_sentiment_cache["data"] is not None and
             sekarang - _sentiment_cache["waktu"] < _sentiment_cache["ttl"]):
         return _sentiment_cache["data"]
 
-    print("  🧠 Menganalisis sentimen market (Reddit + F&G)...")
+    print("  🧠 Menganalisis sentimen market (CryptoPanic + F&G)...")
 
     detail    = []
     skor_buy  = 0
@@ -224,30 +248,28 @@ def get_market_sentiment():
         fg = {"nilai": 50, "label": "Neutral", "sinyal": "NETRAL",
               "skor_buy": 0, "skor_sell": 0, "detail": "N/A"}
 
-    # 2. Reddit Sentiment
-    reddit = get_all_reddit_sentiment()
-    if reddit:
-        rata   = reddit["rata_gabung"]
-        n_sub  = reddit["n_subreddit"]
+    # 2. CryptoPanic News Sentiment
+    news = get_all_news_sentiment()
+    if news:
+        rata  = news["rata_gabung"]
+        n_src = news["n_subreddit"]
 
         if rata >= 1.5:
             skor_buy += 2
-            detail.append(f"Reddit BULLISH ({rata:+.2f}, {n_sub} sub)")
+            detail.append(f"News BULLISH ({rata:+.2f}, {n_src} sumber)")
         elif rata >= 0.5:
             skor_buy += 1
-            detail.append(f"Reddit sedikit bullish ({rata:+.2f})")
+            detail.append(f"News sedikit bullish ({rata:+.2f})")
         elif rata <= -1.5:
             skor_sell += 2
-            detail.append(f"Reddit BEARISH ({rata:+.2f})")
+            detail.append(f"News BEARISH ({rata:+.2f})")
         elif rata <= -0.5:
             skor_sell += 1
-            detail.append(f"Reddit sedikit bearish ({rata:+.2f})")
+            detail.append(f"News sedikit bearish ({rata:+.2f})")
         else:
-            detail.append(f"Reddit netral ({rata:+.2f})")
-
-        print(f"  📱 Reddit: {rata:+.3f} ({n_sub} subreddits)")
+            detail.append(f"News netral ({rata:+.2f})")
     else:
-        reddit = {"rata_gabung": 0, "n_subreddit": 0}
+        news = {"rata_gabung": 0, "n_subreddit": 0}
 
     # Tentukan sentiment keseluruhan
     net_skor = skor_buy - skor_sell
@@ -264,7 +286,7 @@ def get_market_sentiment():
 
     summary = (
         f"F&G:{fg['nilai']} | "
-        f"Reddit:{reddit.get('rata_gabung', 0):+.2f} | "
+        f"News:{news.get('rata_gabung', 0):+.2f} | "
         f"Sentiment:{sentiment}"
     )
 
@@ -273,7 +295,7 @@ def get_market_sentiment():
         "skor_sell": min(skor_sell, 4),
         "sentiment": sentiment,
         "fear_greed": fg,
-        "reddit"   : reddit,
+        "reddit"   : news,   # nama dipertahankan agar kompatibel dengan trading_bot.py
         "detail"   : detail,
         "summary"  : summary
     }

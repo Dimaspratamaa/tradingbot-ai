@@ -20,13 +20,21 @@
 # ============================================
 
 import requests
+import ssl as _ssl_patch
+import urllib3 as _urllib3_patch
+_urllib3_patch.disable_warnings(_urllib3_patch.exceptions.InsecureRequestWarning)
+try:
+    _ssl_patch._create_default_https_context = _ssl_patch._create_unverified_context
+except Exception:
+    pass
+
 import time
 import os
 from datetime import datetime, timedelta
 
 # ── API KEYS ──────────────────────────────────
-FRED_API_KEY    = os.environ.get("FRED_API_KEY", "")
-ALPHAV_API_KEY  = os.environ.get("ALPHAV_API_KEY", "")
+FRED_API_KEY    = os.environ.get("FRED_API_KEY", "be2d7af1d1c13770737a294411d14baa")
+ALPHAV_API_KEY  = os.environ.get("ALPHAV_API_KEY", "DVMC0VXQKJEBYKYL")
 
 # ── CACHE ─────────────────────────────────────
 _macro_cache = {"data": None, "waktu": 0, "ttl": 3600}  # Cache 1 jam
@@ -145,8 +153,113 @@ def get_commodity_price(symbol="WTI"):
     return None
 
 # ══════════════════════════════════════════════
-# 3. ANALISIS MAKRO → SINYAL TRADING
+# 3. FALLBACK TANPA API KEY (sumber publik gratis)
 # ══════════════════════════════════════════════
+
+def get_vix_free():
+    """
+    Ambil VIX dari Yahoo Finance (tanpa API key).
+    ^VIX adalah ticker VIX di Yahoo.
+    """
+    try:
+        url  = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=5d"
+        hdrs = {"User-Agent": "Mozilla/5.0 TradingBot/2.0"}
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        data = resp.json()
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        if len(closes) >= 2:
+            return {
+                "nilai"     : closes[-1],
+                "nilai_prev": closes[-2],
+                "tanggal"   : "Yahoo",
+                "series"    : "VIX_FREE"
+            }
+    except Exception as e:
+        print(f"  ⚠️  VIX free error: {e}")
+    return None
+
+def get_yield_free():
+    """
+    Ambil US 10Y-2Y yield spread dari Yahoo Finance.
+    ^TNX = 10Y Treasury, ^IRX = 13-week (proxy 2Y).
+    """
+    try:
+        hasil = {}
+        tickers = {"yield_10y": "%5ETNX", "yield_2y": "%5EIRX"}
+        hdrs = {"User-Agent": "Mozilla/5.0 TradingBot/2.0"}
+        for nama, ticker in tickers.items():
+            url  = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d"
+            resp = requests.get(url, headers=hdrs, timeout=10)
+            data = resp.json()
+            closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+            closes = [c for c in closes if c is not None]
+            if closes:
+                hasil[nama] = {"nilai": closes[-1],
+                               "nilai_prev": closes[-2] if len(closes)>1 else closes[-1],
+                               "tanggal": "Yahoo", "series": nama}
+            time.sleep(0.3)
+
+        if "yield_10y" in hasil and "yield_2y" in hasil:
+            spread = hasil["yield_10y"]["nilai"] - hasil["yield_2y"]["nilai"]
+            hasil["yield_spread"] = {
+                "nilai": spread, "nilai_prev": None,
+                "tanggal": "Yahoo", "series": "T10Y2Y_FREE"
+            }
+        return hasil
+    except Exception as e:
+        print(f"  ⚠️  Yield free error: {e}")
+    return {}
+
+def get_eurusd_free():
+    """
+    Ambil EUR/USD dari exchangerate-api (tanpa key, gratis).
+    """
+    try:
+        url  = "https://open.er-api.com/v6/latest/USD"
+        resp = requests.get(url, timeout=8)
+        data = resp.json()
+        eur  = data.get("rates", {}).get("EUR", 0)
+        if eur > 0:
+            # EUR/USD = 1 / (USD/EUR)
+            eur_usd = 1 / eur
+            return {"rate": eur_usd, "dari": "USD", "ke": "EUR", "waktu": "free"}
+    except Exception as e:
+        print(f"  ⚠️  EUR/USD free error: {e}")
+    return None
+
+def get_free_macro_data():
+    """
+    Kumpulkan data makro dari sumber gratis tanpa API key.
+    Digunakan sebagai fallback jika FRED/AlphaV key tidak ada.
+    """
+    print("  📊 Mengambil data makro gratis (Yahoo Finance + ER-API)...")
+    fred_data  = {}
+    forex_data = None
+
+    # VIX
+    vix = get_vix_free()
+    if vix:
+        fred_data["vix"] = vix
+        print(f"  ✅ VIX: {vix['nilai']:.1f}")
+
+    # Yield curve
+    yields = get_yield_free()
+    if yields:
+        fred_data.update(yields)
+        if "yield_10y" in yields:
+            print(f"  ✅ 10Y Yield: {yields['yield_10y']['nilai']:.2f}%")
+        if "yield_spread" in yields:
+            print(f"  ✅ Yield Spread (10Y-2Y): {yields['yield_spread']['nilai']:.2f}%")
+
+    # EUR/USD (proxy DXY)
+    forex_data = get_eurusd_free()
+    if forex_data:
+        print(f"  ✅ EUR/USD: {forex_data['rate']:.4f}")
+
+    return fred_data, forex_data
+
+
 
 def analisis_makro(fred_data, forex_data=None, commodity_data=None):
     """
@@ -286,6 +399,10 @@ def get_macro_score():
     """
     Ambil semua data makro dan kembalikan sinyal.
     Cache 1 jam — data makro tidak berubah cepat.
+
+    Prioritas sumber data:
+    1. FRED API + AlphaVantage  → jika key tersedia (paling lengkap)
+    2. Yahoo Finance + ER-API   → fallback gratis otomatis (tanpa key)
     """
     global _macro_cache
     sekarang = time.time()
@@ -294,14 +411,24 @@ def get_macro_score():
             sekarang - _macro_cache["waktu"] < _macro_cache["ttl"]):
         return _macro_cache["data"]
 
-    print("  📊 Menganalisis kondisi makro (FRED + AlphaVantage)...")
+    fred_data      = {}
+    forex_data     = None
+    commodity_data = None
 
-    fred_data      = get_fred_macro() if FRED_API_KEY else {}
-    forex_data     = get_forex_rate("USD", "EUR") if ALPHAV_API_KEY else None
-    commodity_data = get_commodity_price("WTI") if ALPHAV_API_KEY else None
+    if FRED_API_KEY and ALPHAV_API_KEY:
+        # Gunakan API key resmi jika tersedia
+        print("  📊 Menganalisis kondisi makro (FRED + AlphaVantage)...")
+        fred_data      = get_fred_macro()
+        forex_data     = get_forex_rate("USD", "EUR")
+        commodity_data = get_commodity_price("WTI")
+    else:
+        # Fallback gratis — Yahoo Finance + ER-API
+        if not FRED_API_KEY:
+            print("  ⚠️  FRED key kosong → pakai data gratis Yahoo Finance")
+        fred_data, forex_data = get_free_macro_data()
 
     if not fred_data and not forex_data:
-        print("  ⚠️  Macro API keys belum diisi, pakai default")
+        print("  ⚠️  Semua sumber makro gagal — pakai default netral")
         hasil = _default_macro()
         _macro_cache["data"]  = hasil
         _macro_cache["waktu"] = sekarang

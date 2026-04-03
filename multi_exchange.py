@@ -14,6 +14,14 @@
 # ============================================
 
 import requests
+import ssl as _ssl_patch
+import urllib3 as _urllib3_patch
+_urllib3_patch.disable_warnings(_urllib3_patch.exceptions.InsecureRequestWarning)
+try:
+    _ssl_patch._create_default_https_context = _ssl_patch._create_unverified_context
+except Exception:
+    pass
+
 import time
 import hmac
 import hashlib
@@ -23,6 +31,17 @@ from datetime import datetime
 
 # ── API CREDENTIALS ───────────────────────────
 # Indodax
+# ── API KEYS — dari environment variable SAJA ──
+# Jangan hardcode key di sini! Isi di file .env
+import pathlib as _pl
+_env_file = _pl.Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 INDODAX_KEY    = os.environ.get("INDODAX_API_KEY", "WSPHWXIV-BVUCOUQQ-VUSGPPQ2-USAVODEX-FTWCJDHH")
 INDODAX_SECRET = os.environ.get("INDODAX_API_SECRET", "9c7773e8fdaab356eb551ed99814536e02e6d30aead2410035a7c63c21b1019268a25ddbdcadb52b")
 
@@ -31,7 +50,8 @@ TOKO_KEY       = os.environ.get("TOKOCRYPTO_API_KEY", "F87dB12E5a0979897F94A7601
 TOKO_SECRET    = os.environ.get("TOKOCRYPTO_API_SECRET", "f153E5B1cc5aa45b76f4E583b5bF6f21MjXDwtsfFJVmnLEPdWOaObyggxRkhruo")
 
 # Hyperliquid (wallet address untuk trading)
-HL_WALLET      = os.environ.get("HYPERLIQUID_WALLET", "0x5026D53f5B4A882bF4baFe5D4487E1885B96C29")
+# PERINGATAN: HL_SECRET adalah private key Ethereum!
+HL_WALLET      = os.environ.get("HYPERLIQUID_WALLET", "0x5026D53f5B4A882bF4baFe5D4487E1885B96C29a")
 HL_SECRET      = os.environ.get("HYPERLIQUID_SECRET", "0x24fd1d859639b85da24de77d397821e72994cadeca11e695169d91a3713044cb")
 
 # Rate IDR/USD — update berkala
@@ -53,9 +73,12 @@ SYMBOL_MAP = {
     "AVAXUSDT": {"indodax": "avax_idr", "toko": "AVAX_USDT", "hl": "AVAX"},
     "DOTUSDT" : {"indodax": "dot_idr",  "toko": "DOT_USDT",  "hl": "DOT"},
     "LINKUSDT": {"indodax": "link_idr", "toko": "LINK_USDT", "hl": "LINK"},
-    "MATICUSDT":{"indodax": "matic_idr","toko": "MATIC_USDT","hl": "MATIC"},
+    "POLUSDT" : {"indodax": "pol_idr",  "toko": "POL_USDT",  "hl": None},
     "UNIUSDT" : {"indodax": "uni_idr",  "toko": "UNI_USDT",  "hl": "UNI"},
-    "HYPEUSDT": {"indodax": None,        "toko": None,        "hl": "HYPE"},
+    "TONUSDT" : {"indodax": "ton_idr",  "toko": "TON_USDT",  "hl": None},
+    "NEARUSDT": {"indodax": "near_idr", "toko": "NEAR_USDT", "hl": "NEAR"},
+    "ARBUSDT" : {"indodax": None,        "toko": "ARB_USDT",  "hl": "ARB"},
+    "SUIUSDT" : {"indodax": None,        "toko": "SUI_USDT",  "hl": "SUI"},
 }
 
 # ══════════════════════════════════════════════
@@ -263,14 +286,12 @@ HL_BASE = "https://api.hyperliquid.xyz"
 
 def hl_get_price(coin="BTC"):
     """
-    Ambil harga dari Hyperliquid.
-    Hyperliquid adalah DEX perpetual on-chain.
+    Ambil harga dari Hyperliquid DEX perpetual.
     """
     try:
-        url  = f"{HL_BASE}/info"
-        body = {"type": "allMids"}
-        resp = requests.post(url, json=body, timeout=8)
-        data = resp.json()
+        data = _hl_safe_post({"type": "allMids"})
+        if data is None:
+            return None
         if isinstance(data, dict) and coin in data:
             harga = float(data[coin])
             return {
@@ -289,10 +310,9 @@ def hl_get_funding_rate(coin="BTC"):
     Funding rate DEX = indikator sentimen futures on-chain.
     """
     try:
-        url  = f"{HL_BASE}/info"
-        body = {"type": "metaAndAssetCtxs"}
-        resp = requests.post(url, json=body, timeout=8)
-        data = resp.json()
+        data = _hl_safe_post({"type": "metaAndAssetCtxs"})
+        if data is None:
+            return None
 
         if isinstance(data, list) and len(data) >= 2:
             meta      = data[0]
@@ -303,11 +323,11 @@ def hl_get_funding_rate(coin="BTC"):
                 if asset.get("name") == coin and i < len(asset_ctx):
                     ctx = asset_ctx[i]
                     return {
-                        "coin"        : coin,
-                        "funding_rate": float(ctx.get("funding", 0)),
+                        "coin"         : coin,
+                        "funding_rate" : float(ctx.get("funding", 0)),
                         "open_interest": float(ctx.get("openInterest", 0)),
-                        "mark_price"  : float(ctx.get("markPx", 0)),
-                        "premium"     : float(ctx.get("premium", 0))
+                        "mark_price"   : float(ctx.get("markPx", 0)),
+                        "premium"      : float(ctx.get("premium", 0))
                     }
     except Exception as e:
         print(f"  ⚠️  Hyperliquid funding {coin} error: {e}")
@@ -316,10 +336,9 @@ def hl_get_funding_rate(coin="BTC"):
 def hl_get_orderbook(coin="BTC"):
     """Ambil order book dari Hyperliquid"""
     try:
-        url  = f"{HL_BASE}/info"
-        body = {"type": "l2Book", "coin": coin}
-        resp = requests.post(url, json=body, timeout=8)
-        data = resp.json()
+        data = _hl_safe_post({"type": "l2Book", "coin": coin})
+        if data is None:
+            return None
         levels = data.get("levels", [[], []])
         bids   = [[float(b["px"]), float(b["sz"])] for b in levels[0][:10]]
         asks   = [[float(a["px"]), float(a["sz"])] for a in levels[1][:10]]
@@ -371,18 +390,40 @@ def hl_place_order(coin, is_buy, sz, limit_px=None, order_type="market"):
     except Exception as e:
         return {"error": str(e)}
 
+def _hl_safe_post(body, timeout=8):
+    """
+    Helper POST ke Hyperliquid dengan validasi response.
+    Return parsed JSON atau None jika response kosong/bukan JSON.
+    """
+    try:
+        resp = requests.post(
+            f"{HL_BASE}/info",
+            json=body,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout
+        )
+        if resp.status_code != 200:
+            return None
+        text = resp.text.strip()
+        if not text or text == "null":
+            return None
+        return resp.json()
+    except (requests.exceptions.JSONDecodeError, ValueError):
+        return None
+    except Exception as e:
+        raise e   # biarkan caller handle
+
 def hl_get_balance():
     """Cek saldo USDC di Hyperliquid"""
     if not HL_WALLET:
         return 0.0
     try:
-        url  = f"{HL_BASE}/info"
-        body = {
-            "type"   : "clearinghouseState",
-            "user"   : HL_WALLET
-        }
-        resp = requests.post(url, json=body, timeout=8)
-        data = resp.json()
+        data = _hl_safe_post({
+            "type": "clearinghouseState",
+            "user": HL_WALLET
+        })
+        if data is None:
+            return 0.0
         margin = data.get("marginSummary", {})
         return float(margin.get("accountValue", 0))
     except Exception as e:
@@ -394,10 +435,12 @@ def hl_get_positions():
     if not HL_WALLET:
         return []
     try:
-        url  = f"{HL_BASE}/info"
-        body = {"type": "clearinghouseState", "user": HL_WALLET}
-        resp = requests.post(url, json=body, timeout=8)
-        data = resp.json()
+        data = _hl_safe_post({
+            "type": "clearinghouseState",
+            "user": HL_WALLET
+        })
+        if data is None:
+            return []
         positions = []
         for pos in data.get("assetPositions", []):
             p = pos.get("position", {})

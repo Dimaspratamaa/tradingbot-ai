@@ -34,6 +34,14 @@ from market_depth import get_depth_score
 from onchain_pro import get_onchain_pro_score
 from position_sizer import hitung_posisi_size, get_position_info
 from market_regime import get_regime_params, print_regime_status
+from feature_engineering import compute_all_features
+from paper_trading import (
+    is_paper_mode, load_state as paper_load_state,
+    paper_beli_spot, paper_jual_spot,
+    cek_paper_sl_tp, print_status_paper,
+    get_laporan_paper, handle_paper_command,
+    PAPER_MODAL_AWAL
+)
 from correlation_filter import (
     cek_korelasi_dengan_posisi,
     filter_kandidat_diversifikasi
@@ -67,22 +75,61 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 warnings.filterwarnings('ignore')
 
+# ── SSL BYPASS — untuk ISP yang blokir sertifikat Binance ──
+import ssl as _ssl
+import urllib3 as _urllib3
+_urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+try:
+    _ssl._create_default_https_context = _ssl._create_unverified_context
+except Exception:
+    pass
+
+# Patch requests global agar semua call pakai verify=False
+import requests as _req_patch
+_orig_get  = _req_patch.get
+_orig_post = _req_patch.post
+def _patched_get(url, **kw):
+    kw.setdefault('verify', False)
+    return _orig_get(url, **kw)
+def _patched_post(url, **kw):
+    kw.setdefault('verify', False)
+    return _orig_post(url, **kw)
+_req_patch.get  = _patched_get
+_req_patch.post = _patched_post
+
 # ── KONFIGURASI ───────────────────────────────
+# ── Load .env jika ada (development lokal) ────
+import pathlib
+_env_file = pathlib.Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+# ── API KEYS — dari environment variable SAJA ──
+# Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
 TG_TOKEN   = os.environ.get("TG_TOKEN",           "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID",         "8604266478")
+
+if not API_KEY or not API_SECRET:
+    print("⛔ BINANCE_API_KEY / BINANCE_API_SECRET belum diisi di .env!")
+    print("   Salin .env.example ke .env lalu isi dengan key Anda.")
+    import sys; sys.exit(1)
 
 # ── KOIN PRIORITAS ────────────────────────────
 KOIN_PRIORITAS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
     "ADAUSDT","AVAXUSDT","DOTUSDT","LINKUSDT","DOGEUSDT",
     "NEARUSDT","APTUSDT","SUIUSDT","TONUSDT",
-    "ARBUSDT","OPUSDT","MATICUSDT",
+    "ARBUSDT","OPUSDT","POLUSDT",       # MATIC → POL (rename Binance 2024)
     "FETUSDT","RENDERUSDT","WLDUSDT",
     "UNIUSDT","AAVEUSDT",
     "PEPEUSDT","SHIBUSDT","WIFUSDT",
-    "HYPEUSDT","XAUTUSDT",
+    "JUPUSDT","STRKUSDT",               # ganti HYPE & XAUT yg tidak ada di spot
 ]
 
 KOIN_BLACKLIST = {
@@ -150,7 +197,63 @@ MAX_SL_HARIAN    = 3    # Stop entry jika sudah 3 SL dalam sehari
 SL_COOLDOWN_JAM  = 4    # Block entry 4 jam setelah kena SL di koin sama
 
 def buat_client():
-    return Client(API_KEY, API_SECRET, testnet=True)
+    """
+    Buat Binance client dengan header browser asli.
+    Cloudflare block terjadi karena header bot terdeteksi.
+    Solusi: pakai User-Agent browser nyata + header lengkap.
+    """
+    import requests
+    from binance.client import Client as _Client
+
+    # Header browser nyata — hindari Cloudflare detection
+    BROWSER_HEADERS = {
+        "User-Agent"      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/122.0.0.0 Safari/537.36",
+        "Accept"          : "application/json, text/plain, */*",
+        "Accept-Language" : "en-US,en;q=0.9",
+        "Accept-Encoding" : "gzip, deflate, br",
+        "Connection"      : "keep-alive",
+        "Cache-Control"   : "no-cache",
+    }
+
+    # Patch session Binance agar pakai header browser
+    class BrowserClient(_Client):
+        def _init_session(self):
+            sess = super()._init_session()
+            sess.headers.update(BROWSER_HEADERS)
+            sess.verify = True  # SSL verify ON — lebih aman dari Cloudflare
+            return sess
+
+    # Cek proxy dari environment variable
+    proxies = {}
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        print(f"  🔀 Proxy aktif: {proxy_url}")
+
+    try:
+        client = BrowserClient(
+            API_KEY, API_SECRET,
+            testnet=False,
+            requests_params={"proxies": proxies} if proxies else {}
+        )
+        client.ping()
+        print("  ✅ Binance terkoneksi (browser mode)")
+        return client
+    except Exception as e:
+        err = str(e)
+        if "Just a moment" in err or "Cloudflare" in err or "challenge" in err:
+            print("  ⚠️  Cloudflare block terdeteksi!")
+            print("  💡 Solusi: Deploy ke Railway/VPS atau gunakan VPN")
+            print("  💡 Bot tetap berjalan tapi data mungkin terbatas")
+        else:
+            print(f"  ⚠️  Binance connect error: {err[:100]}")
+        # Return client tanpa ping — bot tetap coba jalan
+        try:
+            return BrowserClient(API_KEY, API_SECRET, testnet=False)
+        except Exception:
+            return _Client(API_KEY, API_SECRET, testnet=False)
 
 client = buat_client()
 bayes  = BayesianTradingModel()
@@ -363,38 +466,70 @@ def update_trailing_spot(symbol, harga_skrng):
     return False
 
 # ── PREDIKSI ML ───────────────────────────────
-def prediksi_ml(df):
-    if model_ml is None: return "HOLD",50.0
+def prediksi_ml(df, df_4h=None, df_1d=None):
+    """
+    Prediksi ML v2.0 — menggunakan 85+ quant features.
+    Otomatis fallback ke versi lama jika model belum diretrain.
+    """
+    if model_ml is None: return "HOLD", 50.0
     try:
-        d=df.copy();delta=d['close'].diff()
-        gain=delta.where(delta>0,0).rolling(14).mean()
-        loss=(-delta.where(delta<0,0)).rolling(14).mean()
-        d['rsi']=100-(100/(1+gain/loss))
-        ema12=d['close'].ewm(span=12,adjust=False).mean()
-        ema26=d['close'].ewm(span=26,adjust=False).mean()
-        d['macd']=ema12-ema26;d['macd_signal']=d['macd'].ewm(span=9,adjust=False).mean()
-        d['macd_hist']=d['macd']-d['macd_signal']
-        sma20=d['close'].rolling(20).mean();std20=d['close'].rolling(20).std()
-        bb_upper=sma20+(std20*2);bb_lower=sma20-(std20*2)
-        d['bb_width']=(bb_upper-bb_lower)/sma20
-        d['bb_pos']=(d['close']-bb_lower)/(bb_upper-bb_lower)
-        tr=pd.concat([d['high']-d['low'],(d['high']-d['close'].shift()).abs(),
-                      (d['low']-d['close'].shift()).abs()],axis=1).max(axis=1)
-        d['atr']=tr.rolling(14).mean();d['atr_pct']=d['atr']/d['close']*100
-        d['vol_ratio']=d['volume']/d['volume'].rolling(20).mean()
-        d['ema20']=d['close'].ewm(span=20,adjust=False).mean()
-        d['ema50']=d['close'].ewm(span=50,adjust=False).mean()
-        d['ema_diff']=(d['ema20']-d['ema50'])/d['close']*100
-        d['momentum_3']=d['close'].pct_change(3)*100
-        d['momentum_7']=d['close'].pct_change(7)*100
-        d['momentum_14']=d['close'].pct_change(14)*100
-        d['candle_body']=(d['close']-d['open']).abs()/d['close']*100
-        d['candle_dir']=(d['close']>d['open']).astype(int)
-        d=d.dropna()
-        X=d[features_ml].iloc[-1:].values;X_scaled=scaler_ml.transform(X)
-        pred=model_ml.predict(X_scaled)[0];proba=model_ml.predict_proba(X_scaled)[0]
-        return ("BUY" if pred==1 else "HOLD"),proba[pred]*100
-    except: return "HOLD",50.0
+        # Cek apakah model pakai fitur baru (v2.0) atau lama
+        is_quant_model = (features_ml is not None and
+                          len(features_ml) > 20)  # model baru punya 60+ fitur
+
+        if is_quant_model:
+            # ── Model v2.0: pakai 85+ quant features ──
+            feat_dict, feat_names = compute_all_features(df, df_4h, df_1d)
+            if not feat_dict:
+                return "HOLD", 50.0
+
+            # Buat vector sesuai urutan features_ml
+            X_vec = []
+            for fname in features_ml:
+                X_vec.append(feat_dict.get(fname, 0.0))
+            X = np.array(X_vec).reshape(1, -1)
+
+        else:
+            # ── Fallback: model lama 14 fitur ──
+            d=df.copy()
+            delta=d['close'].diff()
+            gain=delta.where(delta>0,0).rolling(14).mean()
+            loss=(-delta.where(delta<0,0)).rolling(14).mean()
+            d['rsi']=100-(100/(1+gain/loss))
+            ema12=d['close'].ewm(span=12,adjust=False).mean()
+            ema26=d['close'].ewm(span=26,adjust=False).mean()
+            d['macd']=ema12-ema26
+            d['macd_signal']=d['macd'].ewm(span=9,adjust=False).mean()
+            d['macd_hist']=d['macd']-d['macd_signal']
+            sma20=d['close'].rolling(20).mean()
+            std20=d['close'].rolling(20).std()
+            bb_upper=sma20+(std20*2); bb_lower=sma20-(std20*2)
+            d['bb_width']=(bb_upper-bb_lower)/sma20
+            d['bb_pos']=(d['close']-bb_lower)/(bb_upper-bb_lower)
+            tr=pd.concat([d['high']-d['low'],
+                          (d['high']-d['close'].shift()).abs(),
+                          (d['low']-d['close'].shift()).abs()],axis=1).max(axis=1)
+            d['atr']=tr.rolling(14).mean()
+            d['atr_pct']=d['atr']/d['close']*100
+            d['vol_ratio']=d['volume']/d['volume'].rolling(20).mean()
+            d['ema20']=d['close'].ewm(span=20,adjust=False).mean()
+            d['ema50']=d['close'].ewm(span=50,adjust=False).mean()
+            d['ema_diff']=(d['ema20']-d['ema50'])/d['close']*100
+            d['momentum_3']=d['close'].pct_change(3)*100
+            d['momentum_7']=d['close'].pct_change(7)*100
+            d['momentum_14']=d['close'].pct_change(14)*100
+            d['candle_body']=(d['close']-d['open']).abs()/d['close']*100
+            d['candle_dir']=(d['close']>d['open']).astype(int)
+            d=d.dropna()
+            X=d[features_ml].iloc[-1:].values
+
+        X_scaled = scaler_ml.transform(X)
+        pred  = model_ml.predict(X_scaled)[0]
+        proba = model_ml.predict_proba(X_scaled)[0]
+        return ("BUY" if pred == 1 else "HOLD"), proba[pred] * 100
+
+    except Exception as e:
+        return "HOLD", 50.0
 
 # ── CACHE ─────────────────────────────────────
 def get_onchain_cached():
@@ -820,12 +955,16 @@ def cek_semua_sl_tp_spot():
             posisi_spot[symbol]["aktif"]=False; continue
 
         if harga>=pos["take_profit"]:
-            try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
-            except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
+            if is_paper_mode():
+                paper_jual_spot(symbol, harga, "PAPER_TP")
+            else:
+                try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
+                except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,"SPOT_TP")
             reset_pyramid(symbol)
+            mode_label = "📝[PAPER] " if is_paper_mode() else ""
             kirim_telegram(
-                f"🎯 <b>TAKE PROFIT! - {symbol}</b>\n"
+                f"🎯 <b>{mode_label}TAKE PROFIT! - {symbol}</b>\n"
                 f"💰 Entry: ${pos['harga_beli']:,.4f}\n"
                 f"💰 Exit : ${harga:,.4f}\n"
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n🕐 {waktu}"
@@ -835,8 +974,11 @@ def cek_semua_sl_tp_spot():
         elif harga<=pos["stop_loss"]:
             alasan="SPOT_TRAILING" if pos.get("trailing_aktif") else "SPOT_SL"
             emoji="🔄" if pos.get("trailing_aktif") else "🛑"
-            try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
-            except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
+            if is_paper_mode():
+                paper_jual_spot(symbol, harga, alasan)
+            else:
+                try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
+                except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,alasan)
             reset_pyramid(symbol)
             catat_sl_koin(symbol)  # ← v10.2: aktifkan cooldown
@@ -850,18 +992,124 @@ def cek_semua_sl_tp_spot():
             )
             posisi_spot[symbol]["aktif"]=False
 
-def hitung_qty_spot(symbol,harga):
-    qty=TRADE_USDT_SPOT/harga
-    if harga>1000: return round(qty,3)
-    elif harga>1:  return round(qty,2)
-    else:          return round(qty,0)
+# ── CACHE LOT SIZE — hindari spam exchange info API ───────────
+_lot_size_cache = {}   # {symbol: {"step": float, "min_qty": float, "min_notional": float, "waktu": float}}
+_LOT_CACHE_TTL  = 3600  # 1 jam
+
+def _get_lot_size(symbol):
+    """
+    Ambil LOT_SIZE & MIN_NOTIONAL filter dari Binance spot exchange info.
+    Di-cache 1 jam agar tidak spam API setiap order.
+
+    Return dict:
+        step         : float  — stepSize (granularitas qty, mis. 0.001)
+        min_qty      : float  — minQty Binance
+        min_notional : float  — nilai order minimum dalam USDT (biasanya 5–10 USDT)
+    """
+    global _lot_size_cache
+    sekarang = time.time()
+    cached   = _lot_size_cache.get(symbol)
+    if cached and sekarang - cached["waktu"] < _LOT_CACHE_TTL:
+        return cached
+
+    try:
+        info = client.get_symbol_info(symbol)
+        if not info:
+            raise ValueError(f"Symbol {symbol} tidak ditemukan")
+
+        step         = 1.0
+        min_qty      = 0.0
+        min_notional = 10.0   # default aman
+
+        for f in info.get("filters", []):
+            ft = f.get("filterType", "")
+            if ft == "LOT_SIZE":
+                step    = float(f["stepSize"])
+                min_qty = float(f["minQty"])
+            elif ft in ("MIN_NOTIONAL", "NOTIONAL"):
+                min_notional = float(f.get("minNotional") or f.get("minQty", 10.0))
+
+        result = {"step": step, "min_qty": min_qty,
+                  "min_notional": min_notional, "waktu": sekarang}
+        _lot_size_cache[symbol] = result
+        return result
+
+    except Exception as e:
+        print(f"  ⚠️  Gagal ambil LOT_SIZE {symbol}: {e} — pakai fallback")
+        # Fallback konservatif: cache sebentar agar tidak spam
+        fallback = {"step": 0.001, "min_qty": 0.0,
+                    "min_notional": 10.0, "waktu": sekarang}
+        _lot_size_cache[symbol] = fallback
+        return fallback
+
+def _bulatkan_ke_step(qty, step):
+    """
+    Bulatkan qty ke bawah sesuai stepSize Binance.
+    Contoh: qty=0.12345, step=0.001 → 0.123
+    Pakai integer math untuk hindari floating-point error.
+    """
+    if step <= 0:
+        return qty
+    # Hitung presisi desimal dari step (mis. 0.001 → 3)
+    precision = max(0, round(-round(float(f"{step:.10f}").rstrip("0").find(".") - len(
+        float(f"{step:.10f}").rstrip("0").replace(".", "")), 0)))
+    # Cara lebih robust: floor ke kelipatan step
+    qty_floored = (qty // step) * step
+    return round(qty_floored, 8)
+
+def _validasi_min_notional(symbol, qty, harga, lot):
+    """
+    Cek apakah qty * harga memenuhi MIN_NOTIONAL Binance.
+    Kembalikan qty yang sudah aman, atau None jika tidak bisa dipenuhi.
+    """
+    notional = qty * harga
+    if notional < lot["min_notional"]:
+        # Coba naikkan qty ke minimum yang memenuhi notional
+        qty_min = lot["min_notional"] / harga
+        qty_min = _bulatkan_ke_step(qty_min, lot["step"])
+        # Tambah 1 step sebagai buffer untuk floating-point
+        qty_min += lot["step"]
+        qty_min  = round(qty_min, 8)
+        print(f"  🔧 [{symbol}] Qty dinaikkan ke {qty_min} "
+              f"(min notional ${lot['min_notional']:.2f})")
+        return qty_min
+    return qty
+
+def hitung_qty_spot(symbol, harga):
+    """
+    Hitung qty spot menggunakan modal TRADE_USDT_SPOT,
+    disesuaikan dengan LOT_SIZE & MIN_NOTIONAL filter Binance.
+    """
+    lot = _get_lot_size(symbol)
+    qty = TRADE_USDT_SPOT / harga
+    qty = _bulatkan_ke_step(qty, lot["step"])
+
+    # Cek min qty Binance
+    if lot["min_qty"] > 0 and qty < lot["min_qty"]:
+        print(f"  ⚠️  [{symbol}] Qty {qty} < minQty {lot['min_qty']} — skip")
+        return None
+
+    # Cek min notional
+    qty = _validasi_min_notional(symbol, qty, harga, lot)
+    return qty
 
 def _hitung_qty_dari_modal(symbol, harga, modal):
-    """Hitung qty berdasarkan modal dinamis (Kelly)"""
+    """
+    Hitung qty berdasarkan modal dinamis (Kelly Criterion),
+    disesuaikan dengan LOT_SIZE & MIN_NOTIONAL filter Binance.
+    """
+    lot = _get_lot_size(symbol)
     qty = modal / harga
-    if harga > 1000:   return round(qty, 3)
-    elif harga > 1:    return round(qty, 2)
-    else:              return round(qty, 0)
+    qty = _bulatkan_ke_step(qty, lot["step"])
+
+    # Cek min qty Binance
+    if lot["min_qty"] > 0 and qty < lot["min_qty"]:
+        print(f"  ⚠️  [{symbol}] Qty Kelly {qty} < minQty {lot['min_qty']} — pakai minQty")
+        qty = lot["min_qty"]
+
+    # Cek min notional
+    qty = _validasi_min_notional(symbol, qty, harga, lot)
+    return qty
 
 def buka_posisi_spot(hasil):
     waktu=time.strftime("%Y-%m-%d %H:%M:%S")
@@ -880,15 +1128,34 @@ def buka_posisi_spot(hasil):
                     "win_rate": 0, "modal": modal}
 
     qty = _hitung_qty_dari_modal(symbol, harga, modal)
+    if qty is None:
+        print(f"  ⚠️  [{symbol}] Qty tidak valid (LOT_SIZE check gagal) — batal beli")
+        kirim_telegram(
+            f"⚠️ <b>Order Batal - {symbol}</b>\n"
+            f"❌ Qty tidak memenuhi LOT_SIZE/MIN_NOTIONAL Binance\n"
+            f"💡 Coba naikkan TRADE_USDT_SPOT\n"
+            f"🕐 {waktu}"
+        )
+        return
     dyn_sl=hitung_dynamic_sl(harga,atr,hasil.get("df"))
     sl=dyn_sl["sl"];tp=dyn_sl["tp"]
     sl_pct=dyn_sl["sl_pct"];tp_pct=dyn_sl["tp_pct"]
 
-    print(f"\n  💰 [{symbol}] SPOT BUY v10.4! "
+    print(f"\n  {'📝[PAPER]' if is_paper_mode() else '💰[LIVE]'} [{symbol}] SPOT BUY v10.4! "
           f"Skor:{hasil['skor']} Modal:${modal:.0f} "
           f"({pos_info['metode']}) Qty:{qty}")
-    try: client.order_market_buy(symbol=symbol,quantity=qty)
-    except Exception as e: print(f"  ⚠️  Gagal buy: {e}"); return
+
+    if is_paper_mode():
+        # ── PAPER MODE: simulasi tanpa order nyata ──
+        ok = paper_beli_spot(symbol, harga, qty,
+                             dyn_sl["sl"], dyn_sl["tp"],
+                             " | ".join(hasil["detail"][:4]))
+        if not ok:
+            return
+    else:
+        # ── LIVE MODE: eksekusi order nyata ──
+        try: client.order_market_buy(symbol=symbol,quantity=qty)
+        except Exception as e: print(f"  ⚠️  Gagal buy: {e}"); return
 
     last_entry_time[symbol]=time.time()
     posisi_spot[symbol]={
@@ -952,9 +1219,13 @@ def jalankan_siklus(siklus, mode_cepat=False):
         sent=get_sentiment_cached()
         print(f"  🧠 Sentiment: {sent.get('sentiment','N/A')}")
 
-    print("\n💰 Posisi SPOT:")
-    print_status_spot()
-    cek_semua_sl_tp_spot()
+    if is_paper_mode():
+        print_status_paper(client)
+        cek_paper_sl_tp(client, kirim_telegram)
+    else:
+        print("\n💰 Posisi SPOT:")
+        print_status_spot()
+        cek_semua_sl_tp_spot()
     cek_semua_pyramid(posisi_spot,client,TRADE_USDT_SPOT,kirim_telegram)
 
     if not mode_cepat:
@@ -1113,6 +1384,7 @@ kirim_telegram(
     f"₿  BTC Filter : {btc_awal['kondisi']}\n"
     f"🌍 Geo        : {geo_awal['sentiment']}\n"
     f"🤖 ML         : {'✅' if ml_aktif else '⚠️'}\n"
+    f"📌 Mode   : {'📝 PAPER TRADING' if is_paper_mode() else '🔴 LIVE TRADING'}\n"
     "📌 Status: ✅ Berjalan 24/7"
 )
 

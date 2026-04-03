@@ -8,9 +8,20 @@
 # ============================================
 
 import requests
+import ssl as _ssl_patch
+import urllib3 as _urllib3_patch
+_urllib3_patch.disable_warnings(_urllib3_patch.exceptions.InsecureRequestWarning)
+try:
+    _ssl_patch._create_default_https_context = _ssl_patch._create_unverified_context
+except Exception:
+    pass
+
 import time
 import re
+import threading
 from datetime import datetime
+
+_geo_lock = threading.Lock()  # Cegah parallel call bersamaan
 
 # ── KONFIGURASI API ───────────────────────────
 NEWS_API_KEY  = "bd6cd1c660d142a69b57fd2ca87436b5"
@@ -18,7 +29,7 @@ FINNHUB_KEY   = "d6ts24pr01qhkb45d920d6ts24pr01qhkb45d92g"
 NEWSDATA_KEY  = "pub_1047f4b52e224d68a50874bb740bdcf6"
 
 # ── CACHE ─────────────────────────────────────
-_cache = {"data": None, "waktu": 0, "ttl": 600}
+_cache = {"data": None, "waktu": 0, "ttl": 1800}  # 30 menit
 
 # ── KEYWORD BERBOBOT ──────────────────────────
 KEYWORDS_NEGATIF = [
@@ -277,11 +288,16 @@ def get_geo_score():
     sekarang = time.time()
     if _cache["data"] is not None and sekarang-_cache["waktu"] < _cache["ttl"]:
         return _cache["data"]
+    with _geo_lock:
+        # Double-check setelah dapat lock — thread lain mungkin sudah isi cache
+        sekarang = time.time()
+        if _cache["data"] is not None and sekarang-_cache["waktu"] < _cache["ttl"]:
+            return _cache["data"]
 
-    print("  🌍 Menganalisis geopolitik v3.0 "
-          "(NewsAPI+Finnhub+NewsData+RSS)...")
+    print("  🌍 Menganalisis geopolitik v3.1 (NewsAPI + Finnhub)...")
 
-    # Kumpulkan dari semua sumber
+    # NewsData.io & RSS CoinDesk/CoinTelegraph dinonaktifkan —
+    # DNS tidak bisa di-resolve dari environment lokal Indonesia.
     sumber_aktif = []
     semua        = []
 
@@ -291,11 +307,9 @@ def get_geo_score():
     b = get_berita_finnhub()
     if b: semua.extend(b); sumber_aktif.append(f"Finnhub({len(b)})")
 
-    b = get_berita_newsdata()
-    if b: semua.extend(b); sumber_aktif.append(f"NewsData({len(b)})")
-
-    b = get_berita_rss()
-    if b: semua.extend(b); sumber_aktif.append(f"RSS({len(b)})")
+    # NewsData & RSS dinonaktifkan sementara (DNS block):
+    # b = get_berita_newsdata()
+    # b = get_berita_rss()
 
     if not semua:
         print("  ⚠️  Tidak ada berita, pakai default NETRAL")
