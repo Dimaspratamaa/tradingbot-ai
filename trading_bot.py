@@ -99,7 +99,7 @@ if _env_file.exists():
 # Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "8370727642:AAG6BPyiaa4h9ayS5D7cvXkkhujJjjBYHhE")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
 
 if not TG_TOKEN or not TG_CHAT_ID:
@@ -259,34 +259,70 @@ signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT,  handle_shutdown)
 
 # ── FUNGSI DASAR ──────────────────────────────
-def kirim_telegram(pesan, retry=3):
-    # Cek apakah credentials tersedia
+# ── Status Telegram global (untuk hindari spam log) ──
+_tg_valid = None   # None=belum dicek, True=OK, False=error
+
+def kirim_telegram(pesan, retry=2):
+    """
+    Kirim pesan Telegram. Bot TIDAK akan crash jika Telegram gagal.
+    Error hanya di-print ke log, tidak raise exception.
+    """
+    global _tg_valid
+
+    # Cek credentials
     if not TG_TOKEN or not TG_CHAT_ID:
-        print(f"  ⚠️  [TELEGRAM] Token/ChatID kosong — pesan tidak terkirim")
+        return False   # Silent — sudah ada warning di startup
+
+    # Jika token sudah terbukti invalid, skip langsung
+    if _tg_valid is False:
         return False
 
     for attempt in range(retry):
         try:
             url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
             data = {"chat_id": TG_CHAT_ID, "text": pesan, "parse_mode": "HTML"}
-            resp = requests.post(url, data=data, timeout=15)
+            resp = requests.post(url, data=data, timeout=10)
+
             if resp.status_code == 200:
+                _tg_valid = True
                 return True
-            elif resp.status_code == 401:
-                print(f"  ❌ [TELEGRAM] Token tidak valid! Cek TG_TOKEN di .env")
+
+            elif resp.status_code == 404:
+                # Token tidak ditemukan — stop retry, jangan crash
+                if _tg_valid is None:
+                    print("  ❌ [TELEGRAM] Token tidak ditemukan (404)")
+                    print("  💡 Buat token baru via @BotFather lalu update Railway Variables")
+                _tg_valid = False
                 return False
+
+            elif resp.status_code == 401:
+                if _tg_valid is None:
+                    print("  ❌ [TELEGRAM] Unauthorized (401) — cek TG_TOKEN")
+                _tg_valid = False
+                return False
+
             elif resp.status_code == 400:
                 err = resp.json().get("description", "")
-                print(f"  ❌ [TELEGRAM] Bad request: {err}")
+                if "chat not found" in err.lower():
+                    if _tg_valid is None:
+                        print(f"  ❌ [TELEGRAM] Chat tidak ditemukan — cek TG_CHAT_ID")
+                    _tg_valid = False
+                    return False
+                print(f"  ⚠️  [TELEGRAM] Bad request: {err[:60]}")
                 return False
+
             else:
-                print(f"  ⚠️  [TELEGRAM] Status {resp.status_code}, retry {attempt+1}/{retry}")
+                if attempt < retry - 1:
+                    time.sleep(3)
+
         except requests.exceptions.ConnectionError:
-            print(f"  ⚠️  [TELEGRAM] Koneksi gagal (attempt {attempt+1}/{retry})")
-            if attempt < retry - 1: time.sleep(5)
+            if attempt < retry - 1:
+                time.sleep(3)
         except Exception as e:
-            print(f"  ⚠️  [TELEGRAM] Error: {e}")
-            if attempt < retry - 1: time.sleep(5)
+            print(f"  ⚠️  [TELEGRAM] Error: {str(e)[:60]}")
+            if attempt < retry - 1:
+                time.sleep(3)
+
     return False
 
 def reconnect_client():
