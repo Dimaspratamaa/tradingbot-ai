@@ -1,0 +1,19 @@
+{
+  "aktif": true,
+  "modal_awal": 5000.0,
+  "saldo_usdt": 5000.0,
+  "posisi_spot": {},
+  "posisi_futures": {},
+  "riwayat": [],
+  "statistik": {
+    "total_trade": 0,
+    "win": 0,
+    "loss": 0,
+    "total_profit": 0.0,
+    "total_loss": 0.0,
+    "max_drawdown": 0.0,
+    "peak_equity": 5000.0
+  },
+  "dibuat": "2026-04-03 20:32:25",
+  "update_terakhir": "2026-04-03 20:32:25"
+}
