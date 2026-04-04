@@ -35,6 +35,11 @@ from onchain_pro import get_onchain_pro_score
 from position_sizer import hitung_posisi_size, get_position_info
 from market_regime import get_regime_params, print_regime_status
 from feature_engineering import compute_all_features
+from exchange_executor import (
+    eksekusi_beli_multi, eksekusi_jual_multi,
+    get_total_portfolio, format_portfolio_message,
+    print_exchange_status, get_exchange_status
+)
 from paper_trading import (
     is_paper_mode, load_state as paper_load_state,
     paper_beli_spot, paper_jual_spot,
@@ -981,8 +986,11 @@ def cek_semua_sl_tp_spot():
             if is_paper_mode():
                 paper_jual_spot(symbol, harga, alasan)
             else:
-                try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
-                except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
+                eksekusi_jual_multi(
+                    client, symbol, harga, pos["qty"],
+                    alasan=alasan, kirim_telegram=kirim_telegram,
+                    paper_mode=False
+                )
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,alasan)
             reset_pyramid(symbol)
             catat_sl_koin(symbol)  # ← v10.2: aktifkan cooldown
@@ -1157,9 +1165,17 @@ def buka_posisi_spot(hasil):
         if not ok:
             return
     else:
-        # ── LIVE MODE: eksekusi order nyata ──
-        try: client.order_market_buy(symbol=symbol,quantity=qty)
-        except Exception as e: print(f"  ⚠️  Gagal buy: {e}"); return
+        # ── LIVE MODE: eksekusi di semua exchange ──
+        print(f"  🌐 Eksekusi multi-exchange untuk {symbol}...")
+        hasil_exec = eksekusi_beli_multi(
+            client, symbol, harga, qty,
+            skor=hasil["skor"],
+            kirim_telegram=kirim_telegram,
+            paper_mode=False
+        )
+        if "binance" not in hasil_exec.get("sukses", []):
+            print(f"  ⚠️  Binance gagal — posisi tidak dicatat")
+            return
 
     last_entry_time[symbol]=time.time()
     posisi_spot[symbol]={
@@ -1394,6 +1410,7 @@ kirim_telegram(
 
 print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
+print_exchange_status()
 print("="*65)
 
 siklus=0
