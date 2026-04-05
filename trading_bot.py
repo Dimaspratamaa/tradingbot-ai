@@ -36,6 +36,15 @@ from position_sizer import hitung_posisi_size, get_position_info
 from market_regime import get_regime_params, print_regime_status
 from feature_engineering import compute_all_features
 from pattern_detector import analisis_pattern_quant, print_quant_analysis
+from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_live
+from alpha_engine import (
+    get_alpha_engine, extract_alpha_signals, AlphaEngine
+)
+from alpha_engine import (
+    hitung_alpha_score, extract_sinyal,
+    update_alpha_result, print_alpha_status,
+    get_laporan_alpha, reaktivasi_alpha
+)
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
     get_total_portfolio, format_portfolio_message,
@@ -100,7 +109,7 @@ if _env_file.exists():
 # Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8370727642:AAG6BPyiaa4h9ayS5D7cvXkkhujJjjBYHhE")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
 
 if not TG_TOKEN or not TG_CHAT_ID:
@@ -348,7 +357,7 @@ def reconnect_client():
         return False
 
 def simpan_transaksi(symbol, harga_beli, harga_jual,
-                     waktu_beli, waktu_jual, alasan):
+                     waktu_beli, waktu_jual, alasan, alpha_sigs=None):
     profit_pct = ((harga_jual - harga_beli) / harga_beli) * 100
     riwayat = []
     if os.path.exists("riwayat_trade.json"):
@@ -363,6 +372,13 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
     with open("riwayat_trade.json", "w") as f:
         json.dump(riwayat, f, indent=2)
     print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}% | {alasan}")
+
+    # Update Alpha Engine IC dengan hasil trade ini
+    if alpha_sigs:
+        try:
+            get_alpha_engine().catat_trade(alpha_sigs, profit_pct / 100)
+        except Exception:
+            pass
 
 model_ml = scaler_ml = features_ml = None
 
@@ -516,6 +532,27 @@ def update_trailing_spot(symbol, harga_skrng):
 # ── PREDIKSI ML ───────────────────────────────
 def prediksi_ml(df, df_4h=None, df_1d=None):
     """
+    Prediksi ML v3.0 — Ensemble Edition.
+    Priority: Ensemble (XGB+LGB+RF+LSTM) > Model lama > HOLD
+    """
+    # Coba ensemble dulu (model v3.0)
+    try:
+        sinyal, conf, votes = prediksi_ensemble(df, df_4h, df_1d)
+        if votes:  # ensemble berhasil
+            vote_str = " ".join(f"{k}:{v:.2f}" for k,v in votes.items())
+            # print(f"  🤖 Ensemble: {sinyal} ({conf:.1f}%) [{vote_str}]")
+            return sinyal, conf
+    except Exception:
+        pass
+
+    # Fallback ke model lama
+    _pred_lama = _prediksi_ml_lama(df)
+    return _pred_lama
+
+
+def _prediksi_ml_lama(df):
+    """Model lama sebagai fallback."""
+    """
     Prediksi ML v2.0 — menggunakan 85+ quant features.
     Otomatis fallback ke versi lama jika model belum diretrain.
     """
@@ -576,7 +613,7 @@ def prediksi_ml(df, df_4h=None, df_1d=None):
         proba = model_ml.predict_proba(X_scaled)[0]
         return ("BUY" if pred == 1 else "HOLD"), proba[pred] * 100
 
-    except Exception as e:
+    except Exception:
         return "HOLD", 50.0
 
 # ── CACHE ─────────────────────────────────────
@@ -665,24 +702,7 @@ def hitung_skor_koin(symbol):
     if CANDLE_KONFIRMASI and not ind["candle_bullish"] and ind["vol_ratio"] < VOLUME_FILTER_MIN:
         return None   # Skip koin tanpa konfirmasi volume + candle
 
-    if ind["rsi"]<35:      skor+=1;detail.append(f"RSI({ind['rsi']:.1f})")
-    if ind["macd_up"]:     skor+=1;detail.append("MACD↑")
-    if ind["bb_bawah"]:    skor+=1;detail.append("BB↓")
-    if ind["ichi_atas"] or ind["tk_up"]: skor+=1;detail.append("Ichi✓")
-    if ind["vol_tinggi"]:  skor+=1;detail.append(f"Vol{ind['vol_ratio']:.1f}x")
-    if ind["bull_div"]:    skor+=1;detail.append("BullDiv✓")
-    if ind["momentum"]>3:  skor+=1;detail.append(f"Mom+{ind['momentum']:.1f}%")
-    if ind["candle_bullish"]: skor+=1;detail.append("Candle✓")  # ← bonus candle konfirm
-
-    if ind["rsi"]>70:      skor-=2;detail.append(f"RSOB({ind['rsi']:.1f})")  # ← penalty lebih besar
-    if ind["macd_down"]:   skor-=1;detail.append("MACD↓")
-    if ind["bb_atas"]:     skor-=1;detail.append("BB↑")
-    if ind["bear_div"]:    skor-=2;detail.append("BearDiv⚠️")  # ← penalty lebih besar
-    if ind["momentum"]<-3: skor-=1;detail.append(f"Mom{ind['momentum']:.1f}%")
-
-    if ml_pred=="BUY" and ml_conf>=60: skor+=2;detail.append(f"ML({ml_conf:.0f}%)")
-    if onchain["skor_buy"]>=1: skor+=onchain["skor_buy"]
-
+    # ── Hitung legacy signals untuk Alpha Engine ──
     sb=bayes.buat_sinyal_list(
         rsi=ind["rsi"],macd_up=ind["macd_up"],macd_down=ind["macd_down"],
         bb_bawah=ind["bb_bawah"],bb_atas=ind["bb_atas"],
@@ -693,42 +713,36 @@ def hitung_skor_koin(symbol):
         funding_rate=onchain["funding_rate"]["rate"],
         btc_dom=onchain["btc_dominance"]["dominance"])
     bh=bayes.hitung_probabilitas(sb)
-    if bh["keputusan"]=="BUY_KUAT":   skor+=3;detail.append(f"Bayes{bh['prob_buy']}%🔥")
-    elif bh["keputusan"]=="BUY_LEMAH": skor+=1;detail.append(f"Bayes{bh['prob_buy']}%✅")
+    mtf=multi_timeframe_analysis(symbol)
+    ob=analisis_orderbook(client,symbol)
+    mx=analisis_multi_exchange(client,symbol)
+    btc=get_btc_kondisi(client)
+    sent=get_sentiment_cached()
 
-    if geo["skor_buy"]>=2:    skor+=geo["skor_buy"];detail.append(f"🌍+{geo['skor_buy']}")
-    elif geo["skor_buy"]==1:  skor+=1;detail.append("🌍+1")
+    # ══ ALPHA ENGINE v1.0 — Phase 4 ════════════
+    sinyal_alpha = extract_sinyal(
+        ind=ind, ml_pred=ml_pred, ml_conf=ml_conf,
+        bh=bh, onchain=onchain, geo=geo, mtf=mtf,
+        ob=ob, mx=mx, btc=btc, sent=sent,
+        macro=get_macro_cached(), pattern=pattern
+    )
+    alpha_result = hitung_alpha_score(sinyal_alpha)
+    skor         = alpha_result["skor_int"]
+    detail       = alpha_result["detail"]
+
+    # Penalty dari sinyal negatif
+    if ind["rsi"]>72:         skor-=2;detail.append(f"RSOB({ind['rsi']:.1f})")
+    if ind["macd_down"]:      skor-=1;detail.append("MACD↓")
+    if ind["bb_atas"]:        skor-=1;detail.append("BB↑")
+    if ind["bear_div"]:       skor-=2;detail.append("BearDiv⚠️")
+    if ind["momentum"]<-3:    skor-=1;detail.append(f"Mom{ind['momentum']:.1f}%")
     if geo["skor_sell"]>=3:   skor-=4;detail.append("🔴GeoBlock")
     elif geo["skor_sell"]==2: skor-=2;detail.append("🟠Geo-2")
-    elif geo["skor_sell"]==1: skor-=1;detail.append("🟡Geo-1")
-
-    mtf=multi_timeframe_analysis(symbol)
-    if mtf["semua_bullish"]:   skor+=3;detail.append("📊MTF3/3🔥")
-    elif mtf["cukup_bullish"]: skor+=1;detail.append(f"📊MTF{mtf['n_konfirmasi']}/3✅")
-    else:                       skor-=2;detail.append(f"📊MTF{mtf['n_konfirmasi']}/3❌")  # ← penalty lebih besar
-
-    ob=analisis_orderbook(client,symbol)
-    if ob["block_entry"]:
-        skor-=5;detail.append("🚫OB:MANIP!")
-    else:
-        if ob["skor_buy"]>=3:    skor+=3;detail.append(f"📗OB+{ob['skor_buy']}🔥")
-        elif ob["skor_buy"]>=1:  skor+=ob["skor_buy"];detail.append(f"📗OB+{ob['skor_buy']}")
-        if ob["skor_sell"]>=2:   skor-=ob["skor_sell"];detail.append(f"📕OB-{ob['skor_sell']}")
-        elif ob["skor_sell"]==1: skor-=1;detail.append("📕OB-1")
-
-    mx=analisis_multi_exchange(client,symbol)
-    if mx["skor_buy"]>=3:    skor+=3;detail.append(f"🌐MX+{mx['skor_buy']}🔥")
-    elif mx["skor_buy"]>=1:  skor+=mx["skor_buy"];detail.append(f"🌐MX+{mx['skor_buy']}")
-    if mx["skor_sell"]>=2:   skor-=mx["skor_sell"];detail.append(f"🌐MX-{mx['skor_sell']}")
-
-    btc=get_btc_kondisi(client)
-    if btc["skor_market"]<=-2: skor-=3;detail.append(f"₿DUMP{btc['btc_change_1h']:+.1f}%")  # ← penalty lebih besar
-    elif btc["skor_market"]>=2: skor+=1;detail.append(f"₿BULL{btc['btc_change_1h']:+.1f}%")
-
-    sent=get_sentiment_cached()
-    if sent["skor_buy"]>=2:   skor+=2;detail.append(f"🧠BULL+{sent['skor_buy']}")
-    elif sent["skor_buy"]==1: skor+=1;detail.append("🧠+1")
+    if ob.get("block_entry"): skor-=5;detail.append("🚫OB:MANIP!")
+    if btc["skor_market"]<=-2:skor-=3;detail.append(f"₿DUMP{btc['btc_change_1h']:+.1f}%")
     if sent["skor_sell"]>=2:  skor-=2;detail.append(f"🧠BEAR-{sent['skor_sell']}")
+    if mtf["n_konfirmasi"]==0:skor-=2;detail.append("📊MTF0/3❌")
+    # ═══════════════════════════════════════════
 
     # ══ INSTITUSIONAL DATA LAYER ═══════════════
     # Macro (FRED + AlphaVantage)
@@ -793,8 +807,30 @@ def hitung_skor_koin(symbol):
         pattern = {"skor_buy": 0, "skor_sell": 0, "summary": "N/A"}
     # ═══════════════════════════════════════════
 
+    # ══ ALPHA ENGINE (Phase 4) ════════════════
+    try:
+        alpha_eng  = get_alpha_engine()
+        alpha_sigs = extract_alpha_signals(
+            ind, ml_pred, ml_conf, onchain, geo,
+            bayes["prob_buy"] if isinstance(bayes, dict) else bayes,
+            mtf, ob, mx, btc, sent, macro,
+            pattern if isinstance(pattern, dict) else None
+        )
+        alpha_score, alpha_detail, _ = alpha_eng.hitung_alpha_score(alpha_sigs)
+        alpha_bonus = alpha_eng.skor_ke_trading_score(alpha_score)
+        if alpha_bonus != 0:
+            skor += alpha_bonus
+            emoji = "🔥" if alpha_bonus > 0 else "❄️"
+            detail.append(f"{emoji}Alpha:{alpha_score:.0f}({alpha_bonus:+d})")
+    except Exception as e:
+        alpha_sigs  = {}
+        alpha_score = 50.0
+    # ═══════════════════════════════════════════
+
     return {
         "symbol":symbol,"skor":skor,"harga":ind["harga"],"rsi":ind["rsi"],
+        "alpha_sigs":alpha_sigs if 'alpha_sigs' in dir() else {},
+        "alpha_score":alpha_score if 'alpha_score' in dir() else 50.0,
         "atr":ind["atr"],"momentum":ind["momentum"],"ml_pred":ml_pred,
         "ml_conf":ml_conf,"bayes":bh["prob_buy"],"detail":detail,
         "ind":ind,"df":df,"geo":geo,"mtf":mtf,"ob":ob,"mx":mx,
@@ -1039,6 +1075,10 @@ def cek_semua_sl_tp_spot():
                 try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
                 except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,"SPOT_TP")
+            try:
+                update_alpha_result("ml_ensemble_buy", True)
+                update_alpha_result("mtf_3_3", pos.get("mtf_all_bull", False))
+            except Exception: pass
             reset_pyramid(symbol)
             mode_label = "📝[PAPER] " if is_paper_mode() else ""
             kirim_telegram(
@@ -1061,6 +1101,9 @@ def cek_semua_sl_tp_spot():
                     paper_mode=False
                 )
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,alasan)
+            try:
+                update_alpha_result("ml_ensemble_buy", False)
+            except Exception: pass
             reset_pyramid(symbol)
             catat_sl_koin(symbol)  # ← v10.2: aktifkan cooldown
             kirim_telegram(
@@ -1480,6 +1523,7 @@ kirim_telegram(
 print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
 print_exchange_status()
+print_alpha_status()
 print("="*65)
 
 siklus=0
