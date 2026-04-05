@@ -109,7 +109,7 @@ if _env_file.exists():
 # Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "8370727642:AAG6BPyiaa4h9ayS5D7cvXkkhujJjjBYHhE")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
 
 if not TG_TOKEN or not TG_CHAT_ID:
