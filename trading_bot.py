@@ -35,6 +35,7 @@ from onchain_pro import get_onchain_pro_score
 from position_sizer import hitung_posisi_size, get_position_info
 from market_regime import get_regime_params, print_regime_status
 from feature_engineering import compute_all_features
+from pattern_detector import analisis_pattern_quant, print_quant_analysis
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
     get_total_portfolio, format_portfolio_message,
@@ -174,6 +175,8 @@ koin_cache       = {"data": [], "waktu": 0}
 sentiment_cache  = {"data": None, "waktu": 0}
 macro_cache      = {"data": None, "waktu": 0}  # Cache makro 1 jam
 regime_cache     = {"data": None, "waktu": 0}  # Cache regime 15 menit
+pattern_cache    = {}   # {symbol: {"data": ..., "waktu": ...}}
+PATTERN_CACHE_TTL = 1800  # 30 menit
 bot_running      = True
 reconnect_count  = 0
 MAX_RECONNECT    = 10
@@ -612,6 +615,21 @@ def get_sentiment_cached():
                 sentiment_cache["data"]={"skor_buy":0,"skor_sell":0,"sentiment":"NEUTRAL","summary":"N/A"}
     return sentiment_cache["data"]
 
+def get_pattern_cached(symbol, df_1h, df_ref=None):
+    """Cache hasil analisis quant pattern — berat, cache 30 menit."""
+    global pattern_cache
+    sekarang = time.time()
+    cached   = pattern_cache.get(symbol)
+    if cached and sekarang - cached["waktu"] < PATTERN_CACHE_TTL:
+        return cached["data"]
+    try:
+        data = analisis_pattern_quant(df_1h, df_ref, symbol)
+        pattern_cache[symbol] = {"data": data, "waktu": sekarang}
+        return data
+    except Exception as e:
+        print(f"  ⚠️  Pattern analysis {symbol}: {e}")
+        return {"skor_buy": 0, "skor_sell": 0, "detail": [], "summary": "N/A"}
+
 def get_macro_cached():
     """Cache data makro 1 jam — data makro tidak berubah cepat"""
     global macro_cache
@@ -758,6 +776,21 @@ def hitung_skor_koin(symbol):
                 detail.append(f"🔗OnChain-{onchain_pro['skor_sell']}")
         except Exception as e:
             pass
+    # ═══════════════════════════════════════════
+
+    # ══ QUANT PATTERN ANALYSIS (Phase 2) ═══════
+    try:
+        pattern = get_pattern_cached(symbol, df)
+        pb = pattern.get("skor_buy", 0)
+        ps = pattern.get("skor_sell", 0)
+        if pb > 0:
+            skor += pb
+            detail.append(f"🔬Quant+{pb}({pattern.get('summary','')[:20]})")
+        if ps > 0:
+            skor -= ps
+            detail.append(f"🔬Quant-{ps}")
+    except Exception:
+        pattern = {"skor_buy": 0, "skor_sell": 0, "summary": "N/A"}
     # ═══════════════════════════════════════════
 
     return {
