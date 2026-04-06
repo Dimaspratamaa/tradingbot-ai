@@ -37,6 +37,7 @@ from market_regime import get_regime_params, print_regime_status
 from feature_engineering import compute_all_features
 from pattern_detector import analisis_pattern_quant, print_quant_analysis
 from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_live
+from portfolio_optimizer import get_portfolio_optimizer
 from alpha_engine import (
     get_alpha_engine, extract_sinyal, extract_alpha_signals,
     hitung_alpha_score, catat_alpha_result, AlphaEngine
@@ -1243,13 +1244,22 @@ def buka_posisi_spot(hasil):
     waktu=time.strftime("%Y-%m-%d %H:%M:%S")
     symbol=hasil["symbol"];harga=hasil["harga"];atr=hasil["atr"]
 
-    # ── v10.4: Kelly Criterion Position Sizing ──
+    # ── v10.5: Portfolio Optimizer + Kelly ──
     try:
-        akun    = client.get_account()
-        saldo   = next((float(a["free"]) for a in akun["balances"]
-                       if a["asset"] == "USDT"), TRADE_USDT_SPOT)
-        modal   = hitung_posisi_size(saldo, hasil["skor"])
+        akun     = client.get_account()
+        saldo    = next((float(a["free"]) for a in akun["balances"]
+                        if a["asset"] == "USDT"), TRADE_USDT_SPOT)
+        optimizer = get_portfolio_optimizer()
+        # Ambil kandidat symbols dari posisi aktif
+        kandidat_syms = list(posisi_spot.keys()) + [symbol]
+        modal    = optimizer.get_modal_untuk_symbol(
+            symbol, saldo, kandidat_syms, client
+        )
+        # Fallback Kelly jika optimizer return nol
+        if modal < 10:
+            modal = hitung_posisi_size(saldo, hasil["skor"])
         pos_info = get_position_info(saldo, hasil["skor"])
+        pos_info["metode"] = "PORTFOLIO_OPT"
     except Exception:
         modal    = TRADE_USDT_SPOT
         pos_info = {"metode": "DEFAULT", "kelly_f": 0,
@@ -1354,6 +1364,21 @@ def jalankan_siklus(siklus, mode_cepat=False):
     print(f"{'='*65}")
 
     if not mode_cepat:
+        # ── Portfolio rebalance check ──
+        try:
+            opt = get_portfolio_optimizer()
+            if opt.perlu_rebalance() and n_spot + n_futures > 0:
+                all_syms = (list(posisi_spot.keys()) +
+                            list(posisi_futures.keys()))
+                akun = client.get_account()
+                saldo = next((float(a["free"]) for a in akun["balances"]
+                             if a["asset"] == "USDT"), 0)
+                if saldo > 50 and all_syms:
+                    opt.hitung_alokasi_optimal(
+                        client, all_syms, saldo + n_spot * TRADE_USDT_SPOT
+                    )
+        except Exception:
+            pass
         print("\n📊 Kondisi Market:")
         print_kondisi_market(client)
         print_regime_status(client)  # ← v10.4: regime detection
