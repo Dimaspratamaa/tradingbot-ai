@@ -1292,17 +1292,36 @@ def buka_posisi_spot(hasil):
         if not ok:
             return
     else:
-        # ── LIVE MODE: eksekusi di semua exchange ──
-        print(f"  🌐 Eksekusi multi-exchange untuk {symbol}...")
-        hasil_exec = eksekusi_beli_multi(
-            client, symbol, harga, qty,
-            skor=hasil["skor"],
-            kirim_telegram=kirim_telegram,
-            paper_mode=False
+        # ── LIVE MODE: Phase 6 Execution Engine ──
+        exec_eng = get_execution_engine()
+
+        # Pre-trade: cek apakah trade layak setelah biaya
+        ob        = hasil.get("ob", {})
+        orderbook = {"asks": ob.get("asks", []), "bids": ob.get("bids", [])}
+        breakeven = hitung_breakeven(modal, orderbook)
+        print(f"  💹 Breakeven setelah biaya: {breakeven:.3f}%")
+
+        # Eksekusi dengan TWAP/Market otomatis
+        exec_result = exec_eng.eksekusi_beli(
+            client=client,
+            symbol=symbol,
+            harga_sinyal=harga,
+            qty=qty,
+            qty_usd=modal,
+            orderbook=orderbook,
+            paper_mode=False,
+            kirim_telegram=kirim_telegram
         )
-        if "binance" not in hasil_exec.get("sukses", []):
-            print(f"  ⚠️  Binance gagal — posisi tidak dicatat")
+        if not exec_result.get("sukses"):
+            alasan = exec_result.get("alasan", "unknown")
+            print(f"  ⚠️  Eksekusi gagal: {alasan}")
             return
+
+        # Update harga dengan rata-rata eksekusi aktual
+        if exec_result.get("avg_harga", 0) > 0:
+            harga = exec_result["avg_harga"]  # pakai harga aktual
+        print(f"  ✅ Eksekusi: {exec_result.get('metode')} | "
+              f"avg=${harga:,.4f} | latency:{exec_result.get('latency_ms',0)}ms")
 
     last_entry_time[symbol]=time.time()
     # Cache sinyal alpha untuk IC update saat exit
