@@ -197,6 +197,7 @@ MAX_RECONNECT    = 10
 RECONNECT_DELAY  = 30
 last_entry_time  = {}
 siklus_cepat     = 0
+saldo_awal_bot   = 0.0   # dicatat saat startup untuk circuit breaker
 
 # ── PERLINDUNGAN BARU v10.2 ───────────────────
 sl_cooldown      = {}   # {symbol: timestamp} — block entry X jam setelah SL
@@ -1401,6 +1402,30 @@ def jalankan_siklus(siklus, mode_cepat=False):
         cek_jadwal_laporan(posisi_spot,posisi_futures,kirim_telegram,TRADE_USDT_SPOT)
         cek_jadwal_retrain(client,kirim_telegram)
 
+        # ── Phase 5: Portfolio Optimization ──────
+        try:
+            opt  = get_portfolio_optimizer()
+            # Rebalance check
+            rb   = opt.perlu_rebalance()
+            if rb.get("perlu"):
+                print(f"  ⚖️  Rebalance diperlukan: {rb.get('alasan','')}")
+                all_syms = list(posisi_spot.keys()) + [
+                    k for k in KOIN_PRIORITAS[:10]
+                    if k not in posisi_spot]
+                try:
+                    akun  = client.get_account()
+                    saldo = next((float(a["free"]) for a in akun["balances"]
+                                  if a["asset"] == "USDT"), 0)
+                    opt.hitung_alokasi_optimal(
+                        client, all_syms, saldo
+                    )
+                    print("  ✅ Portfolio direoptimasi")
+                except Exception as e:
+                    print(f"  ⚠️  Rebalance error: {e}")
+        except Exception as e:
+            print(f"  ⚠️  Portfolio optimizer: {e}")
+        # ─────────────────────────────────────────
+
     n_spot=sum(1 for p in posisi_spot.values() if p["aktif"])
     n_futures=sum(1 for p in posisi_futures.values() if p.get("aktif"))
     slot_spot=MAX_POSISI_SPOT-n_spot
@@ -1417,6 +1442,26 @@ def jalankan_siklus(siklus, mode_cepat=False):
           f"⏳ Cooldown: {n_cooldown} koin")
 
     # ── v10.2: Stop semua entry jika max SL harian tercapai ──
+        # ── Phase 5: Circuit Breaker ──
+    try:
+        global saldo_awal_bot
+        if saldo_awal_bot > 0:
+            akun_cb = client.get_account()
+            saldo_cb = next((float(a["free"]) for a in akun_cb["balances"]
+                            if a["asset"] == "USDT"), 0.0)
+            # Simple drawdown check
+            drawdown = (saldo_awal_bot - saldo_cb) / saldo_awal_bot
+            if drawdown > 0.10:
+                print(f"  🚨 CIRCUIT BREAKER: Drawdown {drawdown:.1%} > 10%!")
+                kirim_telegram(f"🚨 <b>Circuit Breaker Aktif!</b>\n"
+                               f"Drawdown: {drawdown:.1%}\n"
+                               f"Saldo awal: ${saldo_awal_bot:,.2f}\n"
+                               f"Saldo kini: ${saldo_cb:,.2f}\n"
+                               f"🛑 Entry diblokir!")
+                return
+    except Exception:
+        pass
+
     if cek_max_sl_harian():
         print(f"  🚫 MAX SL HARIAN TERCAPAI ({sl_hari}/{MAX_SL_HARIAN}) — entry diblokir!")
         if sl_hari == MAX_SL_HARIAN:  # Kirim notif hanya sekali
@@ -1557,6 +1602,15 @@ kirim_telegram(
 print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
 print_exchange_status()
+
+# Catat saldo awal untuk circuit breaker
+try:
+    akun_awal     = client.get_account()
+    saldo_awal_bot = next((float(a["free"]) for a in akun_awal["balances"]
+                           if a["asset"] == "USDT"), 0.0)
+    print(f"  💰 Saldo awal tercatat: ${saldo_awal_bot:,.2f} USDT")
+except Exception:
+    saldo_awal_bot = 0.0
 print_alpha_status()
 print("="*65)
 

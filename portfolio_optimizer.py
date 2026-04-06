@@ -123,7 +123,8 @@ def markowitz_optimize(mean_ret, cov_mat, n_simulations=3000):
 
         # Portfolio metrics
         port_ret  = np.dot(w, mean_ret)
-        port_var  = w @ cov_mat.values @ w
+        cov_arr   = cov_mat.values if hasattr(cov_mat, "values") else cov_mat
+        port_var  = w @ cov_arr @ w
         port_vol  = np.sqrt(max(port_var, 1e-10))
         sharpe    = (port_ret - RISK_FREE_RATE) / port_vol
 
@@ -165,7 +166,7 @@ def risk_parity_optimize(cov_mat, max_iter=200, tol=1e-6):
     Keunggulan: lebih stabil dari Markowitz saat crypto volatile
     """
     n = len(cov_mat)
-    cov = cov_mat.values
+    cov = cov_mat.values if hasattr(cov_mat, "values") else np.array(cov_mat)
 
     # Mulai dari equal weight
     w = np.ones(n) / n
