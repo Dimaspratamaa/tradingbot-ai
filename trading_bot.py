@@ -38,6 +38,10 @@ from feature_engineering import compute_all_features
 from pattern_detector import analisis_pattern_quant, print_quant_analysis
 from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_live
 from alpha_engine import (
+    get_alpha_engine, extract_sinyal, extract_alpha_signals,
+    hitung_alpha_score, catat_alpha_result, AlphaEngine
+)
+from alpha_engine import (
     get_alpha_engine, extract_alpha_signals, AlphaEngine
 )
 from alpha_engine import (
@@ -1290,6 +1294,11 @@ def buka_posisi_spot(hasil):
             return
 
     last_entry_time[symbol]=time.time()
+    # Cache sinyal alpha untuk IC update saat exit
+    try:
+        _alpha_sinyal_cache[symbol] = hasil.get("_alpha_sinyal", {})
+    except Exception:
+        pass
     posisi_spot[symbol]={
         "aktif":True,"harga_beli":harga,"harga_tertinggi":harga,
         "stop_loss":sl,"take_profit":tp,"waktu_beli":waktu,

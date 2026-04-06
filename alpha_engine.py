@@ -247,3 +247,38 @@ def get_alpha_engine():
     if _alpha_engine_instance is None:
         _alpha_engine_instance = AlphaEngine()
     return _alpha_engine_instance
+
+
+# ── Wrapper kompatibilitas trading_bot.py ────
+
+def extract_sinyal(ind, ml_pred, ml_conf, bh, onchain, geo,
+                   mtf, ob, mx, btc, sent, macro, pattern=None):
+    """Wrapper agar kompatibel dengan pemanggilan di trading_bot.py."""
+    bayes = bh.get("prob_buy", 50) if isinstance(bh, dict) else 50
+    return extract_alpha_signals(
+        ind=ind, ml_pred=ml_pred, ml_conf=ml_conf,
+        onchain=onchain, geo=geo, bayes=bayes,
+        mtf=mtf, ob=ob, mx=mx, btc=btc, sent=sent,
+        macro=macro if isinstance(macro, dict) else {},
+        pattern=pattern
+    )
+
+def catat_alpha_result(symbol, sinyal_dict, return_pct):
+    """Update IC setelah posisi ditutup. Dipanggil dari simpan_transaksi()."""
+    try:
+        engine = get_alpha_engine()
+        engine.catat_trade(sinyal_dict, return_pct)
+    except Exception as e:
+        print(f"  Alpha update: {e}")
+
+def hitung_alpha_score(sinyal_dict):
+    """Wrapper fungsi untuk hitung_skor_koin."""
+    engine = get_alpha_engine()
+    score, detail, av = engine.hitung_alpha_score(sinyal_dict)
+    delta  = engine.skor_ke_trading_score(score)
+    return {
+        "skor_float"  : score,
+        "skor_int"    : delta,
+        "detail"      : detail,
+        "alpha_values": av,
+    }
