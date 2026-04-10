@@ -1,10 +1,10 @@
 # ============================================
-# TRAIN MODEL v2.0 — Quant Feature Edition
-# Upgrade dari 14 fitur → 85+ fitur
-# Algoritma: Random Forest (siap upgrade ke XGBoost di Phase 3)
+# TRAIN MODEL v3.0 — Ensemble Edition
+# XGBoost + LightGBM + RandomForest + LSTM
 # ============================================
 
-import os, sys, pathlib
+import os, sys, pathlib, warnings
+warnings.filterwarnings('ignore')
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 _env = pathlib.Path(__file__).parent / ".env"
@@ -22,59 +22,63 @@ ssl._create_default_https_context = ssl._create_unverified_context
 from binance.client import Client
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.preprocessing import RobustScaler
-from sklearn.utils.class_weight import compute_class_weight
-import joblib, json, warnings
-warnings.filterwarnings('ignore')
+from feature_engineering import compute_all_features
+from ml_ensemble import (
+    walk_forward_train, train_ensemble,
+    save_ensemble, EnsemblePredictor,
+    XGB_AVAILABLE, LGB_AVAILABLE
+)
 
-from feature_engineering import compute_all_features, get_feature_groups
-
+# ── KONFIGURASI ──────────────────────────────
 API_KEY    = os.environ.get("BINANCE_API_KEY", "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-SYMBOLS    = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+SYMBOLS    = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
 LIMIT      = 1500
 FORWARD    = 3
 TARGET_PCT = 0.008
 
 print("=" * 60)
-print("   TRAINING MODEL v2.0 — 85+ QUANT FEATURES")
+print("   TRAINING MODEL v3.0 — ENSEMBLE EDITION")
+print(f"   XGBoost  : {'✅' if XGB_AVAILABLE else '❌'}")
+print(f"   LightGBM : {'✅' if LGB_AVAILABLE else '❌'}")
 print("=" * 60)
 
+# ── CONNECT ──────────────────────────────────
 try:
     client = Client(API_KEY, API_SECRET, testnet=False,
                     requests_params={"verify": False})
     client.ping()
-    print("Binance terkoneksi")
+    print("✅ Binance terkoneksi")
 except Exception as e:
-    print(f"Binance error: {e}"); sys.exit(1)
+    print(f"❌ Binance error: {e}"); sys.exit(1)
 
+# ── AMBIL DATA ───────────────────────────────
 def get_df(symbol, interval, limit):
     klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     df = pd.DataFrame(klines, columns=[
         "time","open","high","low","close","volume",
-        "close_time","quote_vol","trades","taker_base","taker_quote","ignore"])
+        "close_time","quote_vol","trades",
+        "taker_base","taker_quote","ignore"])
     for col in ["open","high","low","close","volume"]:
         df[col] = df[col].astype(float)
     df["time"] = pd.to_datetime(df["time"], unit="ms")
     return df.set_index("time")
 
-print(f"\nMengambil data {len(SYMBOLS)} simbol...")
+print(f"\n📥 Mengambil data {len(SYMBOLS)} simbol...")
 dfs_1h, dfs_4h, dfs_1d = {}, {}, {}
 for sym in SYMBOLS:
     try:
         dfs_1h[sym] = get_df(sym, Client.KLINE_INTERVAL_1HOUR, LIMIT)
         dfs_4h[sym] = get_df(sym, Client.KLINE_INTERVAL_4HOUR, 400)
         dfs_1d[sym] = get_df(sym, Client.KLINE_INTERVAL_1DAY, 200)
-        print(f"  OK {sym}: {len(dfs_1h[sym])} candle")
+        print(f"  ✅ {sym}: {len(dfs_1h[sym])} candle")
     except Exception as e:
-        print(f"  ERR {sym}: {e}")
+        print(f"  ⚠️  {sym}: {e}")
 
-print(f"\nMembangun feature matrix...")
+# ── BUILD FEATURE MATRIX ─────────────────────
+print(f"\n🔧 Building feature matrix (98+ fitur)...")
 all_rows = []
-WINDOW = 100
+WINDOW   = 100
 
 for sym in SYMBOLS:
     if sym not in dfs_1h: continue
@@ -82,100 +86,94 @@ for sym in SYMBOLS:
     df4h = dfs_4h.get(sym)
     df1d = dfs_1d.get(sym)
     n_rows = 0
+
     for i in range(WINDOW, len(df1h) - FORWARD):
         w1h = df1h.iloc[max(0, i-250):i+1]
-        w4h = df4h.iloc[:max(1, i//4)] if df4h is not None else None
-        w1d = df1d.iloc[:max(1, i//24)] if df1d is not None else None
+        w4h = df4h.iloc[:max(1,i//4)] if df4h is not None else None
+        w1d = df1d.iloc[:max(1,i//24)] if df1d is not None else None
         try:
             feat_dict, _ = compute_all_features(w1h, w4h, w1d)
         except Exception:
             continue
         if not feat_dict: continue
+
         future  = df1h["close"].iloc[i + FORWARD]
         current = df1h["close"].iloc[i]
-        feat_dict["_target"] = int((future / current - 1) > TARGET_PCT)
+        feat_dict["_target"] = int((future/current - 1) > TARGET_PCT)
         feat_dict["_symbol"] = sym
         all_rows.append(feat_dict)
         n_rows += 1
+
     print(f"  {sym}: {n_rows} sampel")
 
 df_feat = pd.DataFrame(all_rows)
-print(f"\nTotal: {len(df_feat)} sampel | {len(df_feat.columns)-2} fitur")
-print(f"Label BUY(1): {df_feat['_target'].sum()} | HOLD(0): {(df_feat['_target']==0).sum()}")
+print(f"\n📊 Total: {len(df_feat)} sampel")
+print(f"   BUY(1): {df_feat['_target'].sum()} | "
+      f"HOLD(0): {(df_feat['_target']==0).sum()}")
 
+# ── FILTER FITUR ─────────────────────────────
 feature_cols = [c for c in df_feat.columns if not c.startswith("_")]
-X_raw = df_feat[feature_cols].fillna(0).replace([np.inf, -np.inf], 0)
+X_raw = df_feat[feature_cols].fillna(0).replace([np.inf,-np.inf], 0)
 y     = df_feat["_target"]
 
-# Filter low-variance
+# Hapus low-variance
 low_var = X_raw.columns[X_raw.std() < 0.001].tolist()
 X_raw   = X_raw.drop(columns=low_var)
 
-# Filter high-correlation
-corr = X_raw.corr().abs()
+# Hapus high-correlation
+corr  = X_raw.corr().abs()
 upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-high_corr = [col for col in upper.columns if any(upper[col] > 0.97)]
-X_raw = X_raw.drop(columns=high_corr)
+hc    = [c for c in upper.columns if any(upper[c] > 0.97)]
+X_raw = X_raw.drop(columns=hc)
 
 feature_names = X_raw.columns.tolist()
-print(f"Fitur final setelah filter: {len(feature_names)}")
+print(f"   Fitur final: {len(feature_names)}")
 
-print(f"\nWalk-forward validation (5 fold)...")
-X    = X_raw.values
-tscv = TimeSeriesSplit(n_splits=5)
-scores_acc, scores_auc = [], []
+X = X_raw.values
 
-for fold, (tr_idx, te_idx) in enumerate(tscv.split(X), 1):
-    X_tr, X_te = X[tr_idx], X[te_idx]
-    y_tr, y_te = y.values[tr_idx], y.values[te_idx]
-    sc = RobustScaler()
-    X_tr_s = sc.fit_transform(X_tr)
-    X_te_s = sc.transform(X_te)
-    cw = compute_class_weight("balanced", classes=np.array([0,1]), y=y_tr)
-    m  = RandomForestClassifier(n_estimators=300, max_depth=12,
-             min_samples_split=10, min_samples_leaf=5,
-             max_features="sqrt", class_weight={0:cw[0],1:cw[1]},
-             random_state=42, n_jobs=-1)
-    m.fit(X_tr_s, y_tr)
-    acc = accuracy_score(y_te, m.predict(X_te_s))
-    auc = roc_auc_score(y_te, m.predict_proba(X_te_s)[:,1])
-    scores_acc.append(acc); scores_auc.append(auc)
-    print(f"  Fold {fold}: Acc={acc:.3f} | AUC={auc:.3f}")
+# ── WALK-FORWARD VALIDATION ──────────────────
+model_weights, mean_aucs, _ = walk_forward_train(
+    X, y.values, feature_names, n_splits=5
+)
 
-print(f"\n  Mean Acc : {np.mean(scores_acc):.3f} +/- {np.std(scores_acc):.3f}")
-print(f"  Mean AUC : {np.mean(scores_auc):.3f} +/- {np.std(scores_auc):.3f}")
+# ── TRAIN FINAL ENSEMBLE ─────────────────────
+trained_models, scaler_final, feat_importance = train_ensemble(
+    X, y.values, feature_names, model_weights
+)
 
-print(f"\nTraining model final...")
-scaler_final = RobustScaler()
-X_scaled     = scaler_final.fit_transform(X)
-cw_all       = compute_class_weight("balanced", classes=np.array([0,1]), y=y.values)
-model_final  = RandomForestClassifier(
-    n_estimators=500, max_depth=15, min_samples_split=8,
-    min_samples_leaf=4, max_features="sqrt",
-    class_weight={0:cw_all[0],1:cw_all[1]},
-    random_state=42, n_jobs=-1)
-model_final.fit(X_scaled, y)
+# ── BUAT ENSEMBLE PREDICTOR ──────────────────
+ensemble = EnsemblePredictor(trained_models, model_weights, scaler_final)
 
-print("\nTop 15 fitur terpenting:")
-importances = pd.Series(model_final.feature_importances_, index=feature_names)
-groups = get_feature_groups()
-for feat, imp in importances.nlargest(15).items():
-    cat = next((c for c, fl in groups.items() if feat in fl), "other")
-    print(f"  {feat:25} [{cat:10}] {imp:.4f}")
+# ── EVALUASI FINAL ───────────────────────────
+print(f"\n📈 Evaluasi ensemble pada data penuh:")
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import RobustScaler as RS
+X_sc   = scaler_final.transform(X)
+y_pred = ensemble.predict(X_sc.reshape(len(X), -1)
+                          if hasattr(X_sc, 'reshape') else
+                          np.array([[v] for v in range(len(X))]))
 
-joblib.dump(model_final,   "model_ml.pkl")
-joblib.dump(scaler_final,  "scaler_ml.pkl")
-joblib.dump(feature_names, "features_ml.pkl")
-meta = {"versi":"2.0-quant","n_fitur":len(feature_names),
-        "n_sampel":len(X),"symbols":SYMBOLS,
-        "mean_acc":round(float(np.mean(scores_acc)),4),
-        "mean_auc":round(float(np.mean(scores_auc)),4),
-        "feature_names":feature_names}
-with open("model_meta.json","w") as f:
-    json.dump(meta, f, indent=2)
+# Simple eval
+proba_all = ensemble.predict_proba(X_sc)[:,1]
+try:
+    from sklearn.metrics import roc_auc_score
+    auc_final = roc_auc_score(y.values, proba_all)
+    print(f"   AUC Final: {auc_final:.4f}")
+except Exception:
+    pass
+
+# ── SIMPAN ───────────────────────────────────
+save_ensemble(ensemble, feature_names, model_weights,
+              mean_aucs, feat_importance)
 
 print(f"\n{'='*60}")
-print(f"  Model disimpan: model_ml.pkl ({len(feature_names)} fitur)")
-print(f"  AUC: {np.mean(scores_auc):.4f}")
+print(f"  Top 10 fitur terpenting:")
+if feat_importance:
+    for feat, imp in sorted(feat_importance.items(),
+                             key=lambda x:-x[1])[:10]:
+        bar = "█" * int(imp * 300)
+        print(f"  {feat:25} {imp:.4f} {bar}")
+
+print(f"\n  Model siap digunakan!")
 print(f"  Jalankan: python trading_bot.py")
 print(f"{'='*60}")

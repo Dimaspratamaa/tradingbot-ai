@@ -40,15 +40,7 @@ from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_liv
 from portfolio_optimizer import get_portfolio_optimizer
 from alpha_engine import (
     get_alpha_engine, extract_sinyal, extract_alpha_signals,
-    hitung_alpha_score, catat_alpha_result, AlphaEngine
-)
-from alpha_engine import (
-    get_alpha_engine, extract_alpha_signals, AlphaEngine
-)
-from alpha_engine import (
-    hitung_alpha_score, extract_sinyal,
-    update_alpha_result, print_alpha_status,
-    get_laporan_alpha, reaktivasi_alpha
+    hitung_alpha_score, catat_alpha_result
 )
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
@@ -114,7 +106,7 @@ if _env_file.exists():
 # Jangan hardcode key di sini! Isi di file .env
 API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8370727642:AAG6BPyiaa4h9ayS5D7cvXkkhujJjjBYHhE")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
 
 if not TG_TOKEN or not TG_CHAT_ID:
@@ -1081,10 +1073,7 @@ def cek_semua_sl_tp_spot():
                 try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
                 except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,"SPOT_TP")
-            try:
-                update_alpha_result("ml_ensemble_buy", True)
-                update_alpha_result("mtf_3_3", pos.get("mtf_all_bull", False))
-            except Exception: pass
+            # alpha IC diupdate otomatis via simpan_transaksi
             reset_pyramid(symbol)
             mode_label = "📝[PAPER] " if is_paper_mode() else ""
             kirim_telegram(
@@ -1107,9 +1096,7 @@ def cek_semua_sl_tp_spot():
                     paper_mode=False
                 )
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,alasan)
-            try:
-                update_alpha_result("ml_ensemble_buy", False)
-            except Exception: pass
+            # alpha IC diupdate otomatis via simpan_transaksi
             reset_pyramid(symbol)
             catat_sl_koin(symbol)  # ← v10.2: aktifkan cooldown
             kirim_telegram(
@@ -1630,7 +1617,12 @@ try:
     print(f"  💰 Saldo awal tercatat: ${saldo_awal_bot:,.2f} USDT")
 except Exception:
     saldo_awal_bot = 0.0
-print_alpha_status()
+# Print alpha engine status
+try:
+    ae = get_alpha_engine()
+    print(f"  🔬 Alpha Engine: {len(ae.state.get('alpha', {}))} alpha factors aktif")
+except Exception:
+    pass
 print("="*65)
 
 siklus=0
