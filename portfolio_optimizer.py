@@ -557,3 +557,37 @@ def get_portfolio_optimizer():
     if _optimizer is None:
         _optimizer = PortfolioOptimizer()
     return _optimizer
+
+
+def hitung_statistik_riwayat(hari=30):
+    """
+    Hitung statistik portfolio dari riwayat_trade.json.
+    Wrapper global dipanggil dari trading_bot.py loop utama.
+    """
+    riwayat_file = pathlib.Path(__file__).parent / "riwayat_trade.json"
+    if not riwayat_file.exists():
+        return None
+    try:
+        data = json.loads(riwayat_file.read_text())
+        if len(data) < 5:
+            return None
+        profits = [t["profit_pct"] for t in data[-100:]
+                   if "profit_pct" in t]
+        if not profits:
+            return None
+        arr      = np.array(profits)
+        menang   = sum(1 for p in profits if p > 0)
+        win_rate = menang / len(profits)
+        sharpe   = np.mean(arr) / (np.std(arr) + 1e-10)
+        var_idx  = max(1, int(len(arr) * 0.05))
+        cvar_95  = float(np.mean(np.sort(arr)[:var_idx]))
+        return {
+            "n_trade"   : len(profits),
+            "win_rate"  : round(win_rate, 4),
+            "avg_profit": round(float(np.mean(arr)), 4),
+            "sharpe"    : round(float(sharpe), 4),
+            "cvar_95"   : round(cvar_95, 4),
+            "max_dd"    : round(float(np.min(arr)), 4),
+        }
+    except Exception:
+        return None

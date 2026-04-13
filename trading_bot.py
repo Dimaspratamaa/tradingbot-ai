@@ -37,7 +37,8 @@ from market_regime import get_regime_params, print_regime_status
 from feature_engineering import compute_all_features
 from pattern_detector import analisis_pattern_quant, print_quant_analysis
 from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_live
-from portfolio_optimizer import get_portfolio_optimizer
+from portfolio_optimizer import get_portfolio_optimizer, hitung_statistik_riwayat
+from execution_engine import get_execution_engine, hitung_breakeven
 from alpha_engine import (
     get_alpha_engine, extract_sinyal, extract_alpha_signals,
     hitung_alpha_score, catat_alpha_result
@@ -171,6 +172,11 @@ MAX_POSISI_SPOT        = 3
 TRADE_USDT_SPOT        = 100.0
 TRAILING_AKTIVASI      = 1.5
 TRAILING_JARAK         = 1.0
+
+# ── SAFEGUARD MODAL (Fix Kritis #2) ───────────
+MAX_MODAL_PER_TRADE    = 300.0  # Hard cap: tidak pernah order > $300 sekali
+MIN_MODAL_PER_TRADE    = 15.0   # Hard floor: order minimal $15
+MAX_PORTFOLIO_RISK_PCT = 0.05   # Max 5% saldo total per trade
 SCAN_INTERVAL          = SCAN_FULL_INTERVAL
 
 # ── STATE ─────────────────────────────────────
@@ -382,15 +388,36 @@ model_ml = scaler_ml = features_ml = None
 
 def load_model():
     global model_ml, scaler_ml, features_ml
+    import pathlib, json as _json
+    
+    # Coba load model lama dulu sebagai baseline
     try:
         model_ml    = joblib.load("model_ml.pkl")
         scaler_ml   = joblib.load("scaler_ml.pkl")
         features_ml = joblib.load("features_ml.pkl")
-        print("  🤖 Model ML dimuat!")
-        return True
+        n_fitur = len(features_ml) if features_ml else 0
+        print(f"  🤖 Model ML dimuat! ({n_fitur} fitur)")
     except:
-        print("  ⚠️  Model ML belum ada!")
+        print("  ⚠️  Model ML belum ada — prediksi dinonaktifkan")
         return False
+
+    # Cek apakah ensemble baru tersedia (lebih akurat)
+    if pathlib.Path("model_ensemble.pkl").exists():
+        try:
+            meta = {}
+            if pathlib.Path("model_meta.json").exists():
+                meta = _json.load(open("model_meta.json"))
+            versi  = meta.get("versi", "ensemble")
+            n_feat = meta.get("n_fitur", "?")
+            auc    = meta.get("mean_auc", "?")
+            print(f"  ✅ Model Ensemble aktif: versi={versi} "                  f"| {n_feat} fitur | AUC={auc}")
+        except Exception:
+            print("  ✅ Model Ensemble tersedia")
+    else:
+        print("  ⚠️  Ensemble belum ditraining — pakai model lama")
+        print("  💡 Untuk upgrade: railway run python train_model.py")
+    
+    return True
 
 # ══════════════════════════════════════════════
 # FIX 5: DYNAMIC COIN LIST
@@ -1246,12 +1273,21 @@ def buka_posisi_spot(hasil):
         # Fallback Kelly jika optimizer return nol
         if modal < 10:
             modal = hitung_posisi_size(saldo, hasil["skor"])
+
+        # Batasi max risk per trade dari saldo total
+        max_dari_saldo = saldo * MAX_PORTFOLIO_RISK_PCT
+        modal = min(modal, max_dari_saldo)
+
         pos_info = get_position_info(saldo, hasil["skor"])
         pos_info["metode"] = "PORTFOLIO_OPT"
     except Exception:
         modal    = TRADE_USDT_SPOT
         pos_info = {"metode": "DEFAULT", "kelly_f": 0,
                     "win_rate": 0, "modal": modal}
+
+    # ── HARD CAP SAFEGUARD — tidak pernah lewati batas ini ──
+    modal = max(MIN_MODAL_PER_TRADE, min(MAX_MODAL_PER_TRADE, modal))
+    print(f"  💰 Modal final: ${modal:.2f} "          f"(min=${MIN_MODAL_PER_TRADE} max=${MAX_MODAL_PER_TRADE})")
 
     qty = _hitung_qty_dari_modal(symbol, harga, modal)
     if qty is None:
@@ -1391,6 +1427,17 @@ def jalankan_siklus(siklus, mode_cepat=False):
         print_regime_status(client)  # ← v10.4: regime detection
         sent=get_sentiment_cached()
         print(f"  🧠 Sentiment: {sent.get('sentiment','N/A')}")
+
+        # Portfolio statistics dari riwayat trade
+        try:
+            stats = hitung_statistik_riwayat()
+            if stats:
+                print(f"  📐 Portfolio: WR={stats['win_rate']:.0%} "
+                      f"Sharpe={stats['sharpe']:.3f} "
+                      f"CVaR={stats['cvar_95']:.2f}% "
+                      f"({stats['n_trade']} trades)")
+        except Exception:
+            pass
 
     if is_paper_mode():
         print_status_paper(client)

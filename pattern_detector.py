@@ -29,39 +29,48 @@ warnings.filterwarnings('ignore')
 
 def hitung_hurst(series, max_lag=20):
     """
-    Hurst Exponent via R/S Analysis.
+    Hurst Exponent via Variance Ratio Method.
+    Lebih akurat dari R/S untuk financial returns.
 
     Interpretasi:
-      H < 0.5 → Mean-reverting (oversold akan balik naik)
-      H = 0.5 → Random walk (tidak bisa diprediksi)
-      H > 0.5 → Trending (momentum berlanjut)
+      H < 0.45 → Mean-reverting (harga cenderung balik ke mean)
+      H = 0.5  → Random walk (tidak bisa diprediksi)
+      H > 0.55 → Trending (momentum berlanjut)
 
     Renaissance menggunakan ini untuk memilih strategi:
     - H < 0.45: pakai mean-reversion strategy
     - H > 0.55: pakai momentum/trend-following
     """
-    if len(series) < max_lag * 2:
+    s = np.array(series, dtype=float)
+    n = len(s)
+    if n < 32:
         return 0.5, "RANDOM"
 
-    lags   = range(2, max_lag)
-    tau    = [np.std(np.subtract(series[lag:], series[:-lag]))
-              for lag in lags]
-    # Hindari log(0)
-    tau = [max(t, 1e-10) for t in tau]
-    lags_arr = np.array(list(lags))
-    tau_arr  = np.array(tau)
-
-    try:
-        poly = np.polyfit(np.log(lags_arr), np.log(tau_arr), 1)
-        H    = poly[0]
-        H    = max(0.0, min(1.0, H))  # clamp 0-1
-    except Exception:
+    var1 = np.var(s, ddof=1)
+    if var1 < 1e-12:
         return 0.5, "RANDOM"
 
-    if H < 0.45:
-        regime = "MEAN_REVERTING"
-    elif H > 0.55:
+    hrs = []
+    for q in [2, 4, 8, 16]:
+        if q * 4 > n:
+            break
+        # q-period aggregated returns
+        ret_q = np.array([s[i:i+q].sum() for i in range(n - q + 1)])
+        var_q = np.var(ret_q, ddof=1)
+        if var_q > 0 and q > 1:
+            vr  = var_q / (q * var1)
+            H_q = np.log(max(vr, 1e-10)) / (2 * np.log(q)) + 0.5
+            hrs.append(float(np.clip(H_q, 0.01, 0.99)))
+
+    if not hrs:
+        return 0.5, "RANDOM"
+
+    H = float(np.mean(hrs))
+
+    if H > 0.55:
         regime = "TRENDING"
+    elif H < 0.45:
+        regime = "MEAN_REVERTING"
     else:
         regime = "RANDOM"
 

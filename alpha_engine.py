@@ -17,34 +17,34 @@ ALPHA_DECAY   = 0.95
 MIN_OBSERVASI = 10
 
 ALPHA_DEFINITIONS = {
-    "rsi_oversold"  : {"kategori":"technical","bobot_awal":0.08,"aktif":True},
-    "rsi_divergence": {"kategori":"technical","bobot_awal":0.10,"aktif":True},
-    "macd_cross"    : {"kategori":"technical","bobot_awal":0.07,"aktif":True},
-    "bb_bounce"     : {"kategori":"technical","bobot_awal":0.06,"aktif":True},
-    "ichimoku_bull" : {"kategori":"technical","bobot_awal":0.07,"aktif":True},
-    "ema_alignment" : {"kategori":"technical","bobot_awal":0.08,"aktif":True},
-    "candle_pattern": {"kategori":"technical","bobot_awal":0.05,"aktif":True},
-    "momentum_3h"   : {"kategori":"momentum","bobot_awal":0.09,"aktif":True},
-    "momentum_24h"  : {"kategori":"momentum","bobot_awal":0.10,"aktif":True},
-    "mtf_alignment" : {"kategori":"momentum","bobot_awal":0.12,"aktif":True},
-    "adx_strong"    : {"kategori":"momentum","bobot_awal":0.07,"aktif":True},
-    "volume_spike"  : {"kategori":"volume","bobot_awal":0.10,"aktif":True},
-    "obv_trend"     : {"kategori":"volume","bobot_awal":0.08,"aktif":True},
-    "mfi_oversold"  : {"kategori":"volume","bobot_awal":0.07,"aktif":True},
-    "ml_ensemble"   : {"kategori":"ml","bobot_awal":0.15,"aktif":True},
-    "bayesian"      : {"kategori":"ml","bobot_awal":0.10,"aktif":True},
-    "hurst_trending": {"kategori":"quant","bobot_awal":0.08,"aktif":True},
-    "hmm_bull"      : {"kategori":"quant","bobot_awal":0.09,"aktif":True},
-    "fft_up"        : {"kategori":"quant","bobot_awal":0.06,"aktif":True},
-    "mean_rev_buy"  : {"kategori":"quant","bobot_awal":0.09,"aktif":True},
-    "geo_bullish"   : {"kategori":"macro","bobot_awal":0.06,"aktif":True},
-    "macro_bullish" : {"kategori":"macro","bobot_awal":0.07,"aktif":True},
-    "sentiment_bull": {"kategori":"macro","bobot_awal":0.07,"aktif":True},
-    "fear_greed_low": {"kategori":"macro","bobot_awal":0.08,"aktif":True},
-    "onchain_bull"  : {"kategori":"onchain","bobot_awal":0.09,"aktif":True},
-    "funding_neg"   : {"kategori":"onchain","bobot_awal":0.07,"aktif":True},
-    "ob_pressure"   : {"kategori":"orderbook","bobot_awal":0.08,"aktif":True},
-    "multi_exchange": {"kategori":"orderbook","bobot_awal":0.08,"aktif":True},
+    "rsi_oversold"  : {"kategori":"technical","bobot_awal":0.12,"aktif":True},
+    "rsi_divergence": {"kategori":"technical","bobot_awal":0.14,"aktif":True},
+    "macd_cross"    : {"kategori":"technical","bobot_awal":0.10,"aktif":True},
+    "bb_bounce"     : {"kategori":"technical","bobot_awal":0.09,"aktif":True},
+    "ichimoku_bull" : {"kategori":"technical","bobot_awal":0.11,"aktif":True},
+    "ema_alignment" : {"kategori":"technical","bobot_awal":0.12,"aktif":True},
+    "candle_pattern": {"kategori":"technical","bobot_awal":0.07,"aktif":True},
+    "momentum_3h"   : {"kategori":"momentum","bobot_awal":0.13,"aktif":True},
+    "momentum_24h"  : {"kategori":"momentum","bobot_awal":0.14,"aktif":True},
+    "mtf_alignment" : {"kategori":"momentum","bobot_awal":0.18,"aktif":True},
+    "adx_strong"    : {"kategori":"momentum","bobot_awal":0.10,"aktif":True},
+    "volume_spike"  : {"kategori":"volume","bobot_awal":0.14,"aktif":True},
+    "obv_trend"     : {"kategori":"volume","bobot_awal":0.11,"aktif":True},
+    "mfi_oversold"  : {"kategori":"volume","bobot_awal":0.10,"aktif":True},
+    "ml_ensemble"   : {"kategori":"ml","bobot_awal":0.22,"aktif":True},
+    "bayesian"      : {"kategori":"ml","bobot_awal":0.15,"aktif":True},
+    "hurst_trending": {"kategori":"quant","bobot_awal":0.11,"aktif":True},
+    "hmm_bull"      : {"kategori":"quant","bobot_awal":0.13,"aktif":True},
+    "fft_up"        : {"kategori":"quant","bobot_awal":0.08,"aktif":True},
+    "mean_rev_buy"  : {"kategori":"quant","bobot_awal":0.12,"aktif":True},
+    "geo_bullish"   : {"kategori":"macro","bobot_awal":0.08,"aktif":True},
+    "macro_bullish" : {"kategori":"macro","bobot_awal":0.10,"aktif":True},
+    "sentiment_bull": {"kategori":"macro","bobot_awal":0.10,"aktif":True},
+    "fear_greed_low": {"kategori":"macro","bobot_awal":0.12,"aktif":True},
+    "onchain_bull"  : {"kategori":"onchain","bobot_awal":0.13,"aktif":True},
+    "funding_neg"   : {"kategori":"onchain","bobot_awal":0.11,"aktif":True},
+    "ob_pressure"   : {"kategori":"orderbook","bobot_awal":0.11,"aktif":True},
+    "multi_exchange": {"kategori":"orderbook","bobot_awal":0.11,"aktif":True},
 }
 
 def _load_alpha_state():
@@ -95,40 +95,81 @@ class AlphaEngine:
                     "n_obs":0,"aktif":defn["aktif"],"ic_mean":0.0}
 
     def hitung_alpha_score(self, sinyal_dict):
+        """
+        Hitung composite alpha score.
+        Sinyal 0.0 = tidak aktif/tidak ada info (dilewati)
+        Sinyal > 0 = ada sinyal bullish dengan kekuatan tertentu
+        Score 50 = netral baseline
+        """
         alpha_state = self.state["alpha"]
         total_score = total_bobot = 0.0
         detail = []
         bobot_aktif = {}
+
         for nama, nilai in sinyal_dict.items():
             if nama not in alpha_state: continue
             a = alpha_state[nama]
             if not a.get("aktif", True): continue
+
             bobot = a["bobot"]
-            ic = a.get("ic_mean", 0.0)
+            ic    = a.get("ic_mean", 0.0)
+
+            # Bobot efektif berdasarkan IC
             if ic > IC_MIN_BOOST:
                 be = bobot * (1 + ic * 2)
             elif ic < 0:
                 be = bobot * max(0.1, 1 + ic)
             else:
                 be = bobot
-            contrib = float(nilai) * be
+
+            v = float(nilai)
+
+            # Sinyal 0.0 = tidak ada data (bukan bearish!)
+            # Contoh: hurst/hmm butuh data historis, jika 0 = skip
+            # Hanya hitung alpha yang punya nilai aktif
+            if v <= 0.0:
+                continue  # lewati — tidak ada informasi
+
+            contrib = v * be
             total_score += contrib
             total_bobot += be
             bobot_aktif[nama] = round(be, 4)
-            if float(nilai) > 0.1:
+
+            if v > 0.15:
                 ic_str = f" IC={ic:.3f}" if a["n_obs"] >= MIN_OBSERVASI else ""
-                detail.append(f"α:{nama[:12]}={float(nilai):.2f}×{be:.3f}{ic_str}")
-        alpha_score = (total_score/total_bobot*100) if total_bobot > 0 else 50.0
+                detail.append(f"α:{nama[:12]}={v:.2f}×{be:.3f}{ic_str}")
+
+        if total_bobot <= 0:
+            return 50.0, [], {}
+
+        # Normalisasi ke 0-100
+        # Sinyal range 0-1, bobot-weighted average
+        # 0 = tidak ada sinyal sama sekali (sangat bearish)
+        # 1 = semua sinyal maksimum (sangat bullish)
+        # 0.5 = setengah aktif setengah tidak = netral
+        raw_avg     = total_score / total_bobot  # 0.0 - 1.0
+        alpha_score = raw_avg * 100              # 0 - 100
+        alpha_score = float(np.clip(alpha_score, 0, 100))
+
         return round(alpha_score, 2), detail, bobot_aktif
 
-    def skor_ke_trading_score(self, alpha_score, threshold=55):
-        if alpha_score >= 80: return 12
-        elif alpha_score >= 70: return 9
-        elif alpha_score >= 60: return 6
-        elif alpha_score >= threshold: return 3
-        elif alpha_score < 30: return -3
-        elif alpha_score < 40: return -1
-        else: return 0
+    def skor_ke_trading_score(self, alpha_score, threshold=52):
+        """
+        Konversi alpha score (0-100) ke delta trading score.
+        Baseline 50 = netral (semua sinyal setengah-setengah).
+        Score 55+ sudah menunjukkan bias bullish yang jelas.
+        """
+        if alpha_score >= 75:   return 5   # sangat bullish
+        elif alpha_score >= 68: return 4   # bullish kuat
+        elif alpha_score >= 62: return 3   # bullish
+        elif alpha_score >= 57: return 2   # cukup bullish
+        elif alpha_score >= threshold: return 1  # sedikit bullish
+        elif alpha_score <= 25: return -5  # sangat bearish
+        elif alpha_score <= 32: return -4  # bearish kuat
+        elif alpha_score <= 38: return -3  # bearish
+        elif alpha_score <= 43: return -2  # cukup bearish
+        elif alpha_score <= 48: return -1  # sedikit bearish
+        else: return 0                     # netral (48-52)
 
     def catat_trade(self, sinyal_dict, return_aktual, waktu=None):
         if waktu is None:
@@ -238,6 +279,24 @@ def extract_alpha_signals(ind, ml_pred, ml_conf, onchain, geo,
     s["funding_neg"]    = min(1.0,max(0,-fr*100)) if fr<0 else 0
     s["ob_pressure"]    = min(1.0,ob.get("skor_buy",0)/3)
     s["multi_exchange"] = min(1.0,mx.get("skor_buy",0)/3)
+
+    # ── BEAR SIGNAL ADJUSTMENT ────────────────
+    # Kurangi sinyal bullish jika ada kondisi bearish kuat
+    bear_penalty = 0.0
+    if ind.get("bear_div", False):      bear_penalty += 0.15
+    if ind.get("rsi", 50) > 72:         bear_penalty += 0.10
+    if btc.get("skor_market", 0) <= -2: bear_penalty += 0.10
+    if sent.get("skor_sell", 0) >= 2:   bear_penalty += 0.08
+    if geo.get("skor_sell", 0) >= 3:    bear_penalty += 0.12
+    if ind.get("momentum", 0) < -3:     bear_penalty += 0.08
+    if mtf.get("n_konfirmasi", 0) == 0: bear_penalty += 0.10
+
+    if bear_penalty > 0:
+        # Terapkan penalty ke semua sinyal yang aktif
+        for k in list(s.keys()):
+            if s[k] > 0:
+                s[k] = max(0.0, float(s[k]) - bear_penalty)
+
     return s
 
 _alpha_engine_instance = None
