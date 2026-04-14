@@ -24,7 +24,13 @@ from multi_exchange import (
 )
 from risk_manager import (
     hitung_dynamic_sl, get_btc_kondisi, cek_early_exit,
-    cek_session_aktif, validasi_entry, print_kondisi_market
+    cek_session_aktif, validasi_entry, print_kondisi_market,
+    # v2.0 Risk Management
+    deteksi_volatility_regime, cek_risk_reward,
+    hitung_position_heat, get_sizing_factor,
+    update_loss_tracker, cek_spread,
+    cek_liquidation_distance, hitung_drawdown_posisi,
+    hitung_ukuran_posisi_risiko, validasi_risiko_lengkap
 )
 from sentiment_analyzer import get_market_sentiment
 from portfolio_tracker import cek_jadwal_laporan
@@ -172,6 +178,7 @@ MAX_POSISI_SPOT        = 3
 TRADE_USDT_SPOT        = 100.0
 TRAILING_AKTIVASI      = 1.5
 TRAILING_JARAK         = 1.0
+MAX_HOLD_JAM           = 72    # Max hold 72 jam (3 hari) — hindari modal terkunci
 
 # ── SAFEGUARD MODAL (Fix Kritis #2) ───────────
 MAX_MODAL_PER_TRADE    = 300.0  # Hard cap: tidak pernah order > $300 sekali
@@ -376,6 +383,12 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
     with open("riwayat_trade.json", "w") as f:
         json.dump(riwayat, f, indent=2)
     print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}% | {alasan}")
+
+    # Update consecutive loss tracker
+    try:
+        update_loss_tracker(profit_pct, symbol)
+    except Exception:
+        pass
 
     # Update Alpha Engine IC dengan hasil trade ini
     if alpha_sigs:
@@ -1076,7 +1089,10 @@ def cek_semua_sl_tp_spot():
         trail=" 🔄" if pos.get("trailing_aktif") else ""
         sl_mode=f"[{pos.get('sl_kondisi','?')}]"
         pyr_info=get_pyramid_info(symbol)
-        print(f"  💰 {symbol}: ${harga:,.4f} | P/L:{profit_pct:+.2f}%{trail} {sl_mode}{pyr_info}")
+        # Drawdown tracker
+        dd_info = hitung_drawdown_posisi(pos, harga)
+        dd_str  = f" | DD:{dd_info['drawdown_pct']:+.1f}%" if dd_info["perlu_review"] else ""
+        print(f"  💰 {symbol}: ${harga:,.4f} | P/L:{profit_pct:+.2f}%{trail} {sl_mode}{pyr_info}{dd_str}")
 
         early=cek_early_exit(symbol,pos,client)
         if early["exit_sekarang"] and profit_pct>0:
@@ -1135,6 +1151,41 @@ def cek_semua_sl_tp_spot():
                 f"⏳ Cooldown: {SL_COOLDOWN_JAM} jam\n🕐 {waktu}"
             )
             posisi_spot[symbol]["aktif"]=False
+
+        # ── TIME-BASED EXIT: posisi terlalu lama ──────────────
+        else:
+            try:
+                waktu_beli_dt = time.strptime(
+                    pos["waktu_beli"][:19], "%Y-%m-%d %H:%M:%S")
+                jam_hold = (time.time() - time.mktime(waktu_beli_dt)) / 3600
+                if jam_hold >= MAX_HOLD_JAM:
+                    alasan_waktu = f"MAX_HOLD_{int(jam_hold)}H"
+                    if is_paper_mode():
+                        paper_jual_spot(symbol, harga, alasan_waktu)
+                    else:
+                        try:
+                            client.order_market_sell(
+                                symbol=symbol, quantity=pos["qty"])
+                        except Exception as e:
+                            print(f"  ⚠️  Time exit gagal: {e}")
+                    emoji_profit = "✅" if profit_pct > 0 else "❌"
+                    simpan_transaksi(symbol, pos["harga_beli"], harga,
+                                     pos["waktu_beli"], waktu, alasan_waktu)
+                    reset_pyramid(symbol)
+                    kirim_telegram(
+                        f"⏰ <b>TIME EXIT - {symbol}</b>\n"
+                        f"💰 Entry: ${pos['harga_beli']:,.4f}\n"
+                        f"💰 Exit : ${harga:,.4f}\n"
+                        f"{'📈' if profit_pct>0 else '📉'} P/L: "
+                        f"<b>{profit_pct:+.2f}%</b> {emoji_profit}\n"
+                        f"⏱ Hold: {jam_hold:.0f} jam (max {MAX_HOLD_JAM}H)\n"
+                        f"🕐 {waktu}"
+                    )
+                    posisi_spot[symbol]["aktif"] = False
+                    print(f"  ⏰ [{symbol}] Time exit setelah {jam_hold:.0f}H "
+                          f"P/L:{profit_pct:+.2f}%")
+            except Exception:
+                pass
 
 # ── CACHE LOT SIZE — hindari spam exchange info API ───────────
 _lot_size_cache = {}   # {symbol: {"step": float, "min_qty": float, "min_notional": float, "waktu": float}}
@@ -1288,6 +1339,41 @@ def buka_posisi_spot(hasil):
     # ── HARD CAP SAFEGUARD — tidak pernah lewati batas ini ──
     modal = max(MIN_MODAL_PER_TRADE, min(MAX_MODAL_PER_TRADE, modal))
     print(f"  💰 Modal final: ${modal:.2f} "          f"(min=${MIN_MODAL_PER_TRADE} max=${MAX_MODAL_PER_TRADE})")
+
+    # ── Phase 2 Risk Manager: validasi risiko komprehensif ──
+    try:
+        dyn_sl_pre = hitung_dynamic_sl(harga, atr)
+        risk_check = validasi_risiko_lengkap(
+            symbol=symbol,
+            harga_entry=harga,
+            sl=dyn_sl_pre["sl"],
+            tp=dyn_sl_pre["tp"],
+            saldo_usdt=saldo if "saldo" in dir() else TRADE_USDT_SPOT * 10,
+            posisi_spot=posisi_spot,
+            posisi_futures={},
+            client=client,
+            df_1h=hasil.get("df"),
+            leverage=1
+        )
+        if not risk_check["boleh"]:
+            alasan_blokir = " | ".join(risk_check["blokir"])
+            print(f"  🚫 Risk check BLOKIR: {alasan_blokir}")
+            kirim_telegram(
+                f"🚫 <b>Entry Diblokir - {symbol}</b>\n"
+                f"📋 {alasan_blokir}\n"
+                f"🕐 {waktu}"
+            )
+            return
+        # Gunakan modal dari risk sizing jika lebih konservatif
+        modal_risk = risk_check.get("modal_usd", modal)
+        if modal_risk < modal:
+            print(f"  📉 Modal dikurangi oleh risk manager: ${modal:.0f} → ${modal_risk:.0f}")
+            modal = modal_risk
+        # Print warnings
+        for w in risk_check.get("warning", []):
+            print(f"  ⚠️  {w}")
+    except Exception as e:
+        print(f"  ⚠️  Risk check error (skip): {e}")
 
     qty = _hitung_qty_dari_modal(symbol, harga, modal)
     if qty is None:
