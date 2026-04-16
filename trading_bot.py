@@ -1068,8 +1068,8 @@ def validasi_entry_ketat(symbol, skor, hasil, client):
     # Cek pause dari Telegram command
     if is_paused():
         print("  ⏸️  Bot PAUSED via Telegram — skip entry baru")
-        time.sleep(30)
-        continue
+        boleh = False
+        alasan.append("⏸️ Bot sedang PAUSED")
 
     if cek_max_sl_harian():
         boleh = False
