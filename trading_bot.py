@@ -49,6 +49,7 @@ from alpha_engine import (
     get_alpha_engine, extract_sinyal, extract_alpha_signals,
     hitung_alpha_score, catat_alpha_result
 )
+from telegram_bot import mulai_polling, hentikan_polling, is_paused
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
     get_total_portfolio, format_portfolio_message,
@@ -347,6 +348,58 @@ def kirim_telegram(pesan, retry=2):
                 time.sleep(3)
 
     return False
+
+
+def test_telegram():
+    """
+    Test koneksi Telegram dan print hasilnya.
+    Dipanggil saat startup untuk diagnosa.
+    """
+    global _tg_valid
+
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("  ❌ [TELEGRAM] TG_TOKEN atau TG_CHAT_ID kosong!")
+        print("  💡 Set di Railway Variables: TG_TOKEN dan TG_CHAT_ID")
+        return False
+
+    print(f"  🔍 Test Telegram...")
+    print(f"     Token : ...{TG_TOKEN[-8:] if len(TG_TOKEN)>8 else '???'}")
+    print(f"     ChatID: {TG_CHAT_ID}")
+
+    try:
+        # Cek token valid
+        url_me = f"https://api.telegram.org/bot{TG_TOKEN}/getMe"
+        r = requests.get(url_me, timeout=10)
+        if r.status_code == 200:
+            bot_info = r.json().get("result", {})
+            print(f"     Bot   : @{bot_info.get('username','?')} ({bot_info.get('first_name','?')})")
+            _tg_valid = None  # reset supaya bisa kirim lagi
+        elif r.status_code == 401 or r.status_code == 404:
+            print(f"  ❌ [TELEGRAM] Token invalid! (HTTP {r.status_code})")
+            print(f"  💡 Buat token baru via @BotFather → /newbot atau /mybots")
+            _tg_valid = False
+            return False
+        else:
+            print(f"  ⚠️  [TELEGRAM] HTTP {r.status_code} saat getMe")
+
+        # Cek chat ID dengan kirim pesan test
+        test_ok = kirim_telegram("✅ <b>Bot Online!</b> Koneksi Telegram OK.")
+        if test_ok:
+            print("  ✅ [TELEGRAM] Pesan test berhasil dikirim!")
+            return True
+        else:
+            print("  ❌ [TELEGRAM] Pesan test GAGAL!")
+            print("  💡 Pastikan Anda sudah START bot Telegram (@botname → /start)")
+            print("  💡 Atau cek TG_CHAT_ID — harus ID chat Anda, bukan username")
+            return False
+
+    except requests.exceptions.ConnectionError:
+        print("  ❌ [TELEGRAM] Tidak bisa konek ke api.telegram.org")
+        return False
+    except Exception as e:
+        print(f"  ❌ [TELEGRAM] Error: {e}")
+        return False
+
 
 def reconnect_client():
     global client, reconnect_count
@@ -1726,6 +1779,11 @@ btc_awal=get_btc_kondisi(client)
 ses_awal=cek_session_aktif(client)
 sent_awal=get_sentiment_cached()
 koin_awal=get_top_koin_by_volume()
+
+# Test koneksi Telegram saat startup
+print("\n📱 Test Telegram...")
+test_telegram()
+print()
 
 kirim_telegram(
     "🚀 <b>Trading Bot v10.4 - Full AI Hedge Fund!</b>\n\n"
