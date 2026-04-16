@@ -576,3 +576,71 @@ def handle_paper_command(pesan, kirim_telegram, client=None):
         )
 
     return True
+
+
+# ══════════════════════════════════════════════
+# FUNGSI TAMBAHAN v2.0 — untuk Telegram Commands
+# ══════════════════════════════════════════════
+
+def set_live_mode(aktif: bool):
+    """
+    Switch antara live trading dan paper trading.
+    Dipanggil dari /live_on dan /live_off Telegram command.
+    """
+    st = load_state()
+    st["live_mode"] = aktif
+    save_state()
+    mode = "LIVE" if aktif else "PAPER"
+    print(f"  🔄 Mode trading diubah ke: {mode}")
+    return aktif
+
+
+def get_paper_status():
+    """
+    Ambil status paper trading untuk Telegram /paper_status.
+    Return dict dengan semua info penting.
+    """
+    st = load_state()
+    modal_awal = st.get("modal_awal", PAPER_MODAL_AWAL)
+    saldo_usdt = st.get("saldo_usdt", modal_awal)
+    posisi     = st.get("posisi_spot", {})
+    riwayat    = st.get("riwayat", [])
+
+    # Hitung statistik
+    n_posisi   = sum(1 for p in posisi.values() if p.get("aktif"))
+    total_pl   = saldo_usdt - modal_awal
+    pl_pct     = (total_pl / modal_awal * 100) if modal_awal > 0 else 0
+
+    menang     = [r for r in riwayat if r.get("profit_pct", 0) > 0]
+    win_rate   = len(menang) / len(riwayat) * 100 if riwayat else 0
+
+    return {
+        "modal_awal"   : round(modal_awal, 2),
+        "saldo_usdt"   : round(saldo_usdt, 2),
+        "total_pl"     : round(pl_pct, 2),
+        "total_trades" : len(riwayat),
+        "win_rate"     : round(win_rate, 1),
+        "n_posisi"     : n_posisi,
+        "live_mode"    : st.get("live_mode", False),
+    }
+
+
+def reset_paper():
+    """
+    Reset paper trading ke kondisi awal.
+    Dipanggil dari /paper_reset Telegram command.
+    """
+    import pathlib
+    state_file = pathlib.Path(__file__).parent / "paper_state.json"
+    default = {
+        "live_mode"  : False,
+        "modal_awal" : PAPER_MODAL_AWAL,
+        "saldo_usdt" : PAPER_MODAL_AWAL,
+        "posisi_spot": {},
+        "riwayat"    : [],
+        "fee_total"  : 0.0,
+    }
+    import json
+    state_file.write_text(json.dumps(default, indent=2))
+    print(f"  🔄 Paper trading direset ke modal ${PAPER_MODAL_AWAL:,.0f}")
+    return True
