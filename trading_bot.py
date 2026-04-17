@@ -437,9 +437,28 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
         json.dump(riwayat, f, indent=2)
     print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}% | {alasan}")
 
-    # Update consecutive loss tracker
+    # Update consecutive loss tracker + alert jika streak tinggi
     try:
-        update_loss_tracker(profit_pct, symbol)
+        state = update_loss_tracker(profit_pct, symbol)
+        konsekutif = state.get("konsekutif_loss", 0)
+
+        # Alert ke Telegram setelah 3 loss berturut
+        if konsekutif == 3:
+            kirim_telegram(
+                f"⚠️ <b>ALERT: 3 Loss Berturut!</b>\n\n"
+                f"Bot mendeteksi {konsekutif} loss berturut-turut.\n"
+                f"Sizing otomatis dikurangi 50% untuk melindungi modal.\n\n"
+                f"Trade terakhir: {symbol} {profit_pct:+.2f}%\n"
+                f"Loss hari ini : {state.get('total_loss_hari',0):.2f}%\n\n"
+                f"💡 Ketik /risk untuk lihat kondisi portfolio"
+            )
+        elif konsekutif == 5:
+            kirim_telegram(
+                f"🚨 <b>WARNING: 5 Loss Berturut!</b>\n\n"
+                f"Pertimbangkan untuk pause bot sementara.\n"
+                f"Ketik /pause untuk stop entry baru.\n"
+                f"Ketik /risk untuk analisis lengkap."
+            )
     except Exception:
         pass
 
@@ -1696,7 +1715,11 @@ def jalankan_siklus(siklus, mode_cepat=False):
     # Gunakan min skor yang lebih ketat antara config dan regime
     min_skor_efektif = max(MIN_SCORE_SPOT, min_skor_r)
 
-    kandidat = [h for h in hasil_scan if h["skor"] >= min_skor_efektif]
+    # ── SKOR RANKING: sort by skor tertinggi dulu ──
+    kandidat = sorted(
+        [h for h in hasil_scan if h["skor"] >= min_skor_efektif],
+        key=lambda x: x["skor"], reverse=True  # skor tertinggi = entry pertama
+    )
 
     # ── v10.4: Correlation filter ──
     posisi_aktif_sym = {s: p for s, p in posisi_spot.items() if p.get("aktif")}
@@ -1708,12 +1731,10 @@ def jalankan_siklus(siklus, mode_cepat=False):
         print(f"  ⚠️  Correlation filter error: {e}")
 
     if kandidat:
-        print(f"\n🏆 Kandidat ({len(kandidat)} lolos skor ≥ {min_skor_efektif}):")
-        for i,k in enumerate(kandidat[:3],1):
-            print(f"  {i}. {k['symbol']:14} "
-                  f"Skor:{k['skor']:+3} | "
-                  f"Vol:{k['ind']['vol_ratio']:.1f}x | "
-                  f"MTF:{k['mtf']['n_konfirmasi']}/3")
+        print(f"\n🏆 Kandidat ({len(kandidat)} lolos skor ≥ {min_skor_efektif}) "              f"— diurutkan skor tertinggi:")
+        for i,k in enumerate(kandidat[:5],1):
+            bar = "█" * min(10, max(0, k['skor']))
+            print(f"  {i}. {k['symbol']:14} "                  f"Skor:{k['skor']:+3} {bar} | "                  f"Vol:{k['ind']['vol_ratio']:.1f}x | "                  f"MTF:{k['mtf']['n_konfirmasi']}/3")
 
     for hasil in kandidat:  # ← Iterasi kandidat yang sudah difilter
         if slot_spot<=0 and slot_futures<=0: break
@@ -1726,6 +1747,14 @@ def jalankan_siklus(siklus, mode_cepat=False):
             continue
 
         if time.time()-last_entry_time.get(symbol,0)<3600: continue
+
+        # Cek sizing factor dari consecutive loss
+        try:
+            sf_data = get_sizing_factor()
+            if not sf_data["normal"]:
+                print(f"  ⚠️  [{symbol}] {sf_data['alasan']} — sizing {sf_data['factor']:.0%}")
+        except Exception:
+            pass
 
         # ── FIX 1+2+4: Validasi ketat ──
         validasi=validasi_entry_ketat(symbol,skor,hasil,client)
