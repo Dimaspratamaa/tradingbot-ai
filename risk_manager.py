@@ -442,8 +442,8 @@ def cek_session_aktif(client=None, symbol="BTCUSDT"):
             vol_skrng  = volumes[-1]
             vol_ratio  = vol_skrng / vol_avg if vol_avg > 0 else 1.0
             vol_info   = f", Vol:{vol_ratio:.1f}x"
-        except:
-            pass
+        except Exception as _e:
+            pass  # non-critical, continue
 
     # ── Volume rendah = pasar sepi, tidak entry ──
     volume_ok = vol_ratio >= VOLUME_MIN_RATIO
@@ -778,7 +778,7 @@ def hitung_position_heat(posisi_spot, posisi_futures,
                 "tipe"   : "FUTURES"
             })
     except Exception:
-        pass
+        pass  # non-critical, continue
 
     if saldo_total <= 0:
         heat_pct = 0.0
@@ -813,7 +813,7 @@ def _load_risk_state():
         try:
             return json.loads(RISK_STATE_FILE.read_text())
         except Exception:
-            pass
+            pass  # non-critical, continue
     return {
         "konsekutif_loss" : 0,
         "total_loss_hari" : 0,
@@ -920,7 +920,7 @@ def cek_korelasi_posisi(symbol_baru, posisi_aktif, client):
             rets   = [closes[i]/closes[i-1]-1 for i in range(1, len(closes))]
             returns[sym] = rets
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     if symbol_baru not in returns or len(returns) < 2:
         return {"aman": True, "korelasi_max": 0,
@@ -944,7 +944,7 @@ def cek_korelasi_posisi(symbol_baru, posisi_aktif, client):
                 max_corr = abs(corr)
                 pasangan = sym
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     aman = max_corr < MAX_CORRELATION
 
@@ -1242,7 +1242,7 @@ def validasi_risiko_lengkap(symbol, harga_entry, sl, tp,
                 warning.append(korr["alasan"])
                 skor -= 10
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # ── 7. Liquidasi (Futures) ──────────────────
     if leverage > 1:

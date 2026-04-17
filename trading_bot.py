@@ -112,10 +112,10 @@ if _env_file.exists():
 
 # ── API KEYS — dari environment variable SAJA ──
 # Jangan hardcode key di sini! Isi di file .env
-API_KEY    = os.environ.get("BINANCE_API_KEY",    "U0LiHucqGcPDj3L8bAHp0Qzfa9ocMxbEilQJeOihSwpmioNnl33WV4wyJcytSkkG")
-API_SECRET = os.environ.get("BINANCE_API_SECRET", "pg412rXf0oSLFUqSn0914FCyYnJtZ32GCtBEwGPjT9UdawZz1BX2rVpxuwJmn0up")
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8735682075:AAE6N7YtKgGkxK-1dZl-RVKCvQplGgaUN8M")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "8604266478")
+API_KEY    = os.environ.get("BINANCE_API_KEY",    "")
+API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+TG_TOKEN   = os.environ.get("TG_TOKEN",   "")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 if not TG_TOKEN or not TG_CHAT_ID:
     print("⚠️  TG_TOKEN / TG_CHAT_ID belum diisi di .env atau Railway Variables!")
@@ -198,6 +198,21 @@ macro_cache      = {"data": None, "waktu": 0}  # Cache makro 1 jam
 regime_cache     = {"data": None, "waktu": 0}  # Cache regime 15 menit
 pattern_cache    = {}   # {symbol: {"data": ..., "waktu": ...}}
 PATTERN_CACHE_TTL = 1800  # 30 menit
+# ── ERROR LOGGER TERPUSAT ────────────────────────
+def log_error(context, e, level="WARNING"):
+    """Logger terpusat — gantikan bare except: pass yang tersebar."""
+    emoji = {"WARNING":"⚠️","ERROR":"❌","CRITICAL":"🚨"}.get(level,"⚠️")
+    print(f"{emoji} [{level}] {context}: {type(e).__name__}: {str(e)[:120]}")
+    if level == "CRITICAL":
+        try: kirim_telegram(f"🚨 <b>Critical!</b>\n{context}\n{str(e)[:200]}")
+        except Exception: pass  # telegram error non-critical
+
+def safe_call(fn, *args, context="", default=None, level="WARNING", **kwargs):
+    """Wrapper safe — gantikan try/except: pass pattern."""
+    try: return fn(*args, **kwargs)
+    except Exception as e: log_error(context or getattr(fn,'__name__','?'), e, level); return default
+
+# ── STATUS GLOBAL ────────────────────────────────
 bot_running      = True
 reconnect_count  = 0
 MAX_RECONNECT    = 10
@@ -418,7 +433,8 @@ def reconnect_client():
         kirim_telegram(f"✅ <b>Koneksi pulih!</b> (#{reconnect_count})")
         reconnect_count = 0
         return True
-    except:
+    except Exception as _e:
+        log_error("op", _e)
         return False
 
 def simpan_posisi_state():
@@ -529,14 +545,14 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
                 f"Ketik /risk untuk analisis lengkap."
             )
     except Exception:
-        pass
+        pass  # non-critical
 
     # Update Alpha Engine IC dengan hasil trade ini
     if alpha_sigs:
         try:
             get_alpha_engine().catat_trade(alpha_sigs, profit_pct / 100)
         except Exception:
-            pass
+            pass  # non-critical
 
 model_ml = scaler_ml = features_ml = None
 
@@ -551,7 +567,8 @@ def load_model():
         features_ml = joblib.load("features_ml.pkl")
         n_fitur = len(features_ml) if features_ml else 0
         print(f"  🤖 Model ML dimuat! ({n_fitur} fitur)")
-    except:
+    except Exception as _e:
+        log_error("op", _e)
         print("  ⚠️  Model ML belum ada — prediksi dinonaktifkan")
         return False
 
@@ -722,7 +739,7 @@ def prediksi_ml(df, df_4h=None, df_1d=None):
             # print(f"  🤖 Ensemble: {sinyal} ({conf:.1f}%) [{vote_str}]")
             return sinyal, conf
     except Exception:
-        pass
+        pass  # non-critical
 
     # Fallback ke model lama
     _pred_lama = _prediksi_ml_lama(df)
@@ -802,7 +819,8 @@ def get_onchain_cached():
     if onchain_cache["data"] is None or sekarang-onchain_cache["waktu"]>300:
         try:
             onchain_cache["data"]=get_onchain_score();onchain_cache["waktu"]=sekarang
-        except:
+        except Exception as _e:
+            log_error("op", _e)
             if onchain_cache["data"] is None:
                 onchain_cache["data"]={"skor_buy":0,"fear_greed":{"score":50},"funding_rate":{"rate":0},"btc_dominance":{"dominance":50}}
     return onchain_cache["data"]
@@ -815,7 +833,8 @@ def get_geo_cached():
             geo_cache["data"]=get_geo_score();geo_cache["waktu"]=sekarang
             if geo_cache["data"].get("alert"):
                 kirim_telegram("🚨 <b>GEO ALERT!</b>\n\n"+geo_cache["data"]["alert_pesan"])
-        except:
+        except Exception as _e:
+            log_error("op", _e)
             if geo_cache["data"] is None:
                 geo_cache["data"]={"skor_buy":0,"skor_sell":0,"sentiment":"NETRAL","rata_skor":0.0,"n_berita":0,"alert":False,"alert_pesan":""}
     return geo_cache["data"]
@@ -826,7 +845,8 @@ def get_sentiment_cached():
     if sentiment_cache["data"] is None or sekarang-sentiment_cache["waktu"]>1800:
         try:
             sentiment_cache["data"]=get_market_sentiment();sentiment_cache["waktu"]=sekarang
-        except:
+        except Exception as _e:
+            log_error("op", _e)
             if sentiment_cache["data"] is None:
                 sentiment_cache["data"]={"skor_buy":0,"skor_sell":0,"sentiment":"NEUTRAL","summary":"N/A"}
     return sentiment_cache["data"]
@@ -952,7 +972,7 @@ def hitung_skor_koin(symbol):
             elif depth["skor_sell"] == 1:
                 skor -= 1; detail.append("🌊Depth-1")
         except Exception as e:
-            pass
+            pass  # non-critical
 
     # On-chain Pro (Glassnode) — hanya BTC/ETH
     onchain_pro = {"skor_buy": 0, "skor_sell": 0, "sentimen": "N/A"}
@@ -968,7 +988,7 @@ def hitung_skor_koin(symbol):
                 skor -= onchain_pro["skor_sell"]
                 detail.append(f"🔗OnChain-{onchain_pro['skor_sell']}")
         except Exception as e:
-            pass
+            pass  # non-critical
     # ═══════════════════════════════════════════
 
     # ══ QUANT PATTERN ANALYSIS (Phase 2) ═══════
@@ -1331,8 +1351,7 @@ def cek_semua_sl_tp_spot():
                     posisi_spot[symbol]["aktif"] = False
                     print(f"  ⏰ [{symbol}] Time exit setelah {jam_hold:.0f}H "
                           f"P/L:{profit_pct:+.2f}%")
-            except Exception:
-                pass
+            except Exception as _e: pass  # time exit calc
 
 # ── CACHE LOT SIZE — hindari spam exchange info API ───────────
 _lot_size_cache = {}   # {symbol: {"step": float, "min_qty": float, "min_notional": float, "waktu": float}}
@@ -1584,7 +1603,7 @@ def buka_posisi_spot(hasil):
     try:
         _alpha_sinyal_cache[symbol] = hasil.get("_alpha_sinyal", {})
     except Exception:
-        pass
+        pass  # silenced
     posisi_spot[symbol]={
         "aktif":True,"harga_beli":harga,"harga_tertinggi":harga,
         "stop_loss":sl,"take_profit":tp,"waktu_beli":waktu,
@@ -1627,7 +1646,7 @@ def print_status_spot():
             print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:14} "
                   f"${pos['harga_beli']:,.4f}→${harga:,.4f} "
                   f"P/L:{pl_pct:+.2f}%{trail}")
-        except: pass
+        except Exception as _e: pass  # display only, non-critical
 
 # ══════════════════════════════════════════════
 # FIX 3: DUAL-SPEED SCAN LOOP
@@ -1654,8 +1673,7 @@ def jalankan_siklus(siklus, mode_cepat=False):
                     opt.hitung_alokasi_optimal(
                         client, all_syms, saldo + n_spot * TRADE_USDT_SPOT
                     )
-        except Exception:
-            pass
+        except Exception as _e: pass  # portfolio display
         print("\n📊 Kondisi Market:")
         print_kondisi_market(client)
         print_regime_status(client)  # ← v10.4: regime detection
@@ -1670,8 +1688,7 @@ def jalankan_siklus(siklus, mode_cepat=False):
                       f"Sharpe={stats['sharpe']:.3f} "
                       f"CVaR={stats['cvar_95']:.2f}% "
                       f"({stats['n_trade']} trades)")
-        except Exception:
-            pass
+        except Exception as _e: pass  # stats display
 
     if is_paper_mode():
         print_status_paper(client)
@@ -1747,7 +1764,7 @@ def jalankan_siklus(siklus, mode_cepat=False):
                                f"🛑 Entry diblokir!")
                 return
     except Exception:
-        pass
+        pass  # silenced
 
     if cek_max_sl_harian():
         print(f"  🚫 MAX SL HARIAN TERCAPAI ({sl_hari}/{MAX_SL_HARIAN}) — entry diblokir!")
@@ -1824,7 +1841,7 @@ def jalankan_siklus(siklus, mode_cepat=False):
             if not sf_data["normal"]:
                 print(f"  ⚠️  [{symbol}] {sf_data['alasan']} — sizing {sf_data['factor']:.0%}")
         except Exception:
-            pass
+            pass  # silenced
 
         # ── FIX 1+2+4: Validasi ketat ──
         validasi=validasi_entry_ketat(symbol,skor,hasil,client)
@@ -1923,8 +1940,7 @@ except Exception:
 try:
     ae = get_alpha_engine()
     print(f"  🔬 Alpha Engine: {len(ae.state.get('alpha', {}))} alpha factors aktif")
-except Exception:
-    pass
+except Exception as _e: print(f"  ⚠️  [alpha-startup] {_e}")
 print("="*65)
 
 # ── Mulai Telegram Command Handler ────────────

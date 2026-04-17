@@ -68,7 +68,7 @@ def _log_eksekusi(exchange, symbol, side, qty, harga, status, detail=""):
             try:
                 log = json.loads(EXEC_LOG_FILE.read_text())
             except Exception:
-                pass
+                pass  # non-critical, continue
         log.append(entry)
         # Simpan max 500 entri terakhir
         EXEC_LOG_FILE.write_text(json.dumps(log[-500:], indent=2))
@@ -191,7 +191,7 @@ def pilih_exchange_terbaik(symbol, side="BUY", skor=0):
             if bal >= MODAL_TOKO:
                 exchanges.append(("tokocrypto", 7))
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # Indodax — untuk spread IDR
     if (INDODAX_AKTIF and INDODAX_KEY and INDODAX_SECRET and
@@ -201,7 +201,7 @@ def pilih_exchange_terbaik(symbol, side="BUY", skor=0):
             if bal.get("idr", 0) >= MODAL_INDODAX:
                 exchanges.append(("indodax", 6))
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # Hyperliquid — hanya untuk leverage/futures dengan skor tinggi
     if (HL_AKTIF and HL_WALLET and HL_SECRET and
@@ -211,7 +211,7 @@ def pilih_exchange_terbaik(symbol, side="BUY", skor=0):
             if bal >= MODAL_HL:
                 exchanges.append(("hyperliquid", 8))
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # Sort by prioritas
     exchanges.sort(key=lambda x: x[1], reverse=True)
@@ -281,6 +281,7 @@ def eksekusi_beli_multi(binance_client, symbol, harga, qty_binance,
                 print(f"    ❌ Tokocrypto error: {err}")
         except Exception as e:
             hasil["tokocrypto"] = {"status": "ERROR", "error": str(e)}
+            print(f"  ⚠️  [tokocrypto] {e}")
             print(f"    ❌ Tokocrypto BUY error: {e}")
 
     def _beli_indodax():
@@ -309,6 +310,7 @@ def eksekusi_beli_multi(binance_client, symbol, harga, qty_binance,
                 print(f"    ❌ Indodax error: {err}")
         except Exception as e:
             hasil["indodax"] = {"status": "ERROR", "error": str(e)}
+            print(f"  ⚠️  [indodax] {e}")
             print(f"    ❌ Indodax BUY error: {e}")
 
     def _beli_hyperliquid():
@@ -468,7 +470,7 @@ def get_total_portfolio(binance_client):
             detail["indodax"] = {"idr": idr, "usd": usd}
             total_usd += usd
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # Tokocrypto
     if TOKO_KEY:
@@ -477,7 +479,7 @@ def get_total_portfolio(binance_client):
             detail["tokocrypto"] = {"usdt": bal, "usd": bal}
             total_usd += bal
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     # Hyperliquid
     if HL_WALLET:
@@ -486,7 +488,7 @@ def get_total_portfolio(binance_client):
             detail["hyperliquid"] = {"usdc": bal, "usd": bal}
             total_usd += bal
         except Exception:
-            pass
+            pass  # non-critical, continue
 
     return {"total_usd": total_usd, "detail": detail}
 

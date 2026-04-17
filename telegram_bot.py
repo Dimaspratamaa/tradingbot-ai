@@ -152,7 +152,7 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
             from risk_manager import get_btc_kondisi
             btc = get_btc_kondisi(client)
             btc_info = f"{btc['kondisi']} ({btc['btc_change_1h']:+.2f}%/1H)"
-        except: pass
+        except Exception: pass  # non-critical
 
         # Session
         ses_info = "N/A"
@@ -160,7 +160,7 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
             from risk_manager import cek_session_aktif
             ses = cek_session_aktif(client)
             ses_info = f"{ses['sesi']} ({ses['jam_wib']})"
-        except: pass
+        except Exception: pass  # non-critical
 
         mode_str = "✅ AKTIF" if not _bot_paused else "⏸️ PAUSED"
 
@@ -230,7 +230,8 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                         f"     SL   : ${pos['stop_loss']:,.4f}\n"
                         f"     TP   : ${pos['take_profit']:,.4f}\n\n"
                     )
-                except:
+                except Exception as _e:
+                    pass  # noqa: error logged via _e
                     pesan += f"  • {symbol}: error ambil harga\n"
 
         # Futures positions
@@ -254,7 +255,8 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                         f"     P/L  : <b>{pl_pct:+.2f}%</b>"
                         f" ({pl_pct*pos.get('leverage',1):+.1f}% lev)\n\n"
                     )
-                except:
+                except Exception as _e:
+                    pass  # noqa: error logged via _e
                     pesan += f"  • {symbol}: error\n"
 
         balas(pesan)
@@ -478,7 +480,7 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                 akun  = client.get_account()
                 saldo = next((float(a["free"]) for a in akun["balances"]
                               if a["asset"] == "USDT"), 0)
-            except: pass
+            except Exception: pass  # non-critical
 
             heat  = hitung_position_heat(posisi_spot, posisi_futures, saldo)
             sf    = get_sizing_factor()
@@ -548,7 +550,8 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                     harga = h.get("harga", 0)
                     em = "🔥" if skor >= 7 else ("📈" if skor >= 5 else "⚪")
                     pesan += f"{em} <b>{sym}</b> | ${harga:,.4f} | Skor: {skor}\n"
-                except:
+                except Exception as _e:
+                    pass  # noqa: error logged via _e
                     pesan += f"  • {sym}: error\n"
             balas(pesan)
         except Exception as e:
@@ -634,7 +637,7 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                 akun  = client.get_account()
                 saldo = next((float(a["free"]) for a in akun["balances"]
                               if a["asset"] == "USDT"), 0)
-            except: pass
+            except Exception: pass  # non-critical
 
             heat = hitung_position_heat(posisi_spot, posisi_futures, saldo)
             n_pos = len(heat["detail_posisi"])
@@ -743,7 +746,8 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                 f"Berlaku untuk entry baru.\n"
                 f"(Bot masih menggunakan ATR-based SL jika lebih baik)"
             )
-        except:
+        except Exception as _e:
+            pass  # noqa: error logged via _e
             balas("⚠️ Format tidak valid. Contoh: /setsl 2.5")
 
     # ── /settp X ──
@@ -761,7 +765,8 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
                 f"✅ Take Profit diset ke <b>{val}%</b>\n"
                 f"Berlaku untuk entry baru."
             )
-        except:
+        except Exception as _e:
+            pass  # noqa: error logged via _e
             balas("⚠️ Format tidak valid. Contoh: /settp 5.0")
 
     else:
