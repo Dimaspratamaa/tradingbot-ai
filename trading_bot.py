@@ -180,6 +180,7 @@ TRADE_USDT_SPOT        = 100.0
 TRAILING_AKTIVASI      = 1.5
 TRAILING_JARAK         = 1.0
 MAX_HOLD_JAM           = 72    # Max hold 72 jam (3 hari) — hindari modal terkunci
+POSISI_STATE_FILE = "posisi_state.json"   # Persist posisi saat restart
 
 # ── SAFEGUARD MODAL (Fix Kritis #2) ───────────
 MAX_MODAL_PER_TRADE    = 300.0  # Hard cap: tidak pernah order > $300 sekali
@@ -419,6 +420,74 @@ def reconnect_client():
         return True
     except:
         return False
+
+def simpan_posisi_state():
+    """
+    Simpan posisi_spot ke JSON agar tidak hilang saat Railway restart.
+    Dipanggil setiap kali posisi berubah (buka/tutup).
+    """
+    try:
+        state = {
+            "posisi_spot"    : {k: v for k, v in posisi_spot.items()
+                                if v.get("aktif")},
+            "last_entry_time": {k: v for k, v in last_entry_time.items()},
+            "sl_cooldown"    : {k: v for k, v in sl_cooldown.items()},
+            "waktu_simpan"   : time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        with open(POSISI_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"  ⚠️  Gagal simpan posisi state: {e}")
+
+
+def muat_posisi_state():
+    """
+    Muat posisi_spot dari JSON saat bot startup (setelah Railway restart).
+    Mencegah bot lupa posisi yang sudah terbuka.
+    """
+    global posisi_spot, last_entry_time, sl_cooldown
+    if not os.path.exists(POSISI_STATE_FILE):
+        return 0
+
+    try:
+        with open(POSISI_STATE_FILE) as f:
+            state = json.load(f)
+
+        posisi_lama = state.get("posisi_spot", {})
+        if not posisi_lama:
+            return 0
+
+        n_loaded = 0
+        for symbol, pos in posisi_lama.items():
+            if pos.get("aktif"):
+                posisi_spot[symbol] = pos
+                n_loaded += 1
+
+        # Restore cooldown
+        for k, v in state.get("sl_cooldown", {}).items():
+            sl_cooldown[k] = v
+
+        # Restore entry time
+        for k, v in state.get("last_entry_time", {}).items():
+            last_entry_time[k] = v
+
+        waktu_simpan = state.get("waktu_simpan", "?")
+        if n_loaded > 0:
+            print(f"  ✅ Loaded {n_loaded} posisi dari state terakhir ({waktu_simpan})")
+            for sym, pos in posisi_spot.items():
+                if pos.get("aktif"):
+                    jam = (time.time() - time.mktime(
+                        time.strptime(pos["waktu_beli"][:19],
+                                      "%Y-%m-%d %H:%M:%S"))) / 3600
+                    print(f"     {sym}: entry=${pos['harga_beli']:,.4f} "
+                          f"SL=${pos['stop_loss']:,.4f} "
+                          f"hold={jam:.1f}H")
+        return n_loaded
+
+    except Exception as e:
+        print(f"  ⚠️  Gagal muat posisi state: {e}")
+        return 0
+
 
 def simpan_transaksi(symbol, harga_beli, harga_jual,
                      waktu_beli, waktu_jual, alasan, alpha_sigs=None):
@@ -1185,7 +1254,7 @@ def cek_semua_sl_tp_spot():
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n"
                 f"📋 {early['alasan']}\n🕐 {waktu}"
             )
-            posisi_spot[symbol]["aktif"]=False; continue
+            posisi_spot[symbol]["aktif"]=False; simpan_posisi_state(); continue
 
         if harga>=pos["take_profit"]:
             if is_paper_mode():
@@ -1523,6 +1592,7 @@ def buka_posisi_spot(hasil):
         "sl_kondisi":dyn_sl["kondisi"],"sl_multiplier":dyn_sl["multiplier"],
         "modal":modal,"kelly_f":pos_info.get("kelly_f",0)
     }
+    simpan_posisi_state()  # ← Persist ke disk setelah buka posisi
 
     mtf=hasil.get("mtf",{});ob=hasil.get("ob",{})
     geo=hasil.get("geo",{});mx=hasil.get("mx",{})
@@ -1835,9 +1905,15 @@ print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
 print_exchange_status()
 
+# ── Muat posisi dari state terakhir (restart-safe) ──
+print("\n  📂 Memuat posisi state terakhir...")
+n_posisi_loaded = muat_posisi_state()
+if n_posisi_loaded == 0:
+    print("  💤 Tidak ada posisi aktif sebelumnya")
+
 # Catat saldo awal untuk circuit breaker
 try:
-    akun_awal     = client.get_account()
+    akun_awal      = client.get_account()
     saldo_awal_bot = next((float(a["free"]) for a in akun_awal["balances"]
                            if a["asset"] == "USDT"), 0.0)
     print(f"  💰 Saldo awal tercatat: ${saldo_awal_bot:,.2f} USDT")
