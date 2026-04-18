@@ -177,8 +177,14 @@ MIN_VOLUME_USD         = 5_000_000
 
 MAX_POSISI_SPOT        = 3
 TRADE_USDT_SPOT        = 100.0
-TRAILING_AKTIVASI      = 1.5
-TRAILING_JARAK         = 1.0
+TRAILING_AKTIVASI      = 1.5    # Trailing aktif setelah profit 1.5%
+TRAILING_JARAK         = 1.0    # Trailing distance 1.0%
+BREAKEVEN_AKTIVASI     = 1.0    # Break-even SL saat profit 1.0%
+BREAKEVEN_BUFFER       = 0.15   # SL digeser ke entry + 0.15% (cover fee 0.1% + buffer)
+PARTIAL_CLOSE_AKTIF    = True   # Jual 50% posisi saat profit 2%
+PARTIAL_CLOSE_PROFIT   = 2.0    # Trigger partial close di profit 2%
+PARTIAL_CLOSE_PCT      = 0.5    # Jual 50% dari posisi
+SCALE_UP_AKTIF         = False  # Scale-up posisi (default off — konservatif)
 MAX_HOLD_JAM           = 72    # Max hold 72 jam (3 hari) — hindari modal terkunci
 POSISI_STATE_FILE = "posisi_state.json"   # Persist posisi saat restart
 
@@ -707,23 +713,106 @@ def multi_timeframe_analysis(symbol):
 
 # ── TRAILING STOP ─────────────────────────────
 def update_trailing_spot(symbol, harga_skrng):
+    """
+    Update trailing stop + break-even SL.
+
+    Urutan aktivasi:
+    1. Profit 1.0% → Break-even: SL digeser ke entry+0.1% (tidak bisa rugi)
+    2. Profit 1.5% → Trailing aktif: SL mengikuti harga tertinggi - 1%
+    """
     if symbol not in posisi_spot: return False
-    pos=posisi_spot[symbol]
+    pos = posisi_spot[symbol]
     if not pos["aktif"]: return False
-    profit_pct=((harga_skrng-pos["harga_beli"])/pos["harga_beli"])*100
-    harga_tinggi=pos.get("harga_tertinggi",pos["harga_beli"])
-    if harga_skrng>harga_tinggi:
-        posisi_spot[symbol]["harga_tertinggi"]=harga_skrng
-        harga_tinggi=harga_skrng
-    if not pos.get("trailing_aktif") and profit_pct>=TRAILING_AKTIVASI:
-        posisi_spot[symbol]["trailing_aktif"]=True
-        kirim_telegram(f"🔄 <b>Trailing Aktif - {symbol}</b>\n📈 Profit: <b>+{profit_pct:.2f}%</b>")
-    if pos.get("trailing_aktif"):
-        sl_baru=harga_tinggi*(1-TRAILING_JARAK/100)
-        if sl_baru>pos["stop_loss"]:
-            posisi_spot[symbol]["stop_loss"]=sl_baru
-            return True
-    return False
+
+    harga_beli   = pos["harga_beli"]
+    profit_pct   = (harga_skrng - harga_beli) / harga_beli * 100
+    harga_tinggi = pos.get("harga_tertinggi", harga_beli)
+    sl_saat_ini  = pos["stop_loss"]
+    updated      = False
+
+    # Update harga tertinggi
+    if harga_skrng > harga_tinggi:
+        posisi_spot[symbol]["harga_tertinggi"] = harga_skrng
+        harga_tinggi = harga_skrng
+
+    # ── STEP 1: Break-Even SL ──────────────────
+    # Aktif saat profit >= BREAKEVEN_AKTIVASI (default 1%)
+    # SL digeser ke harga_beli + BREAKEVEN_BUFFER (0.1%)
+    # Artinya: posisi ini TIDAK BISA RUGI lagi
+    if (profit_pct >= BREAKEVEN_AKTIVASI and
+            not pos.get("breakeven_aktif") and
+            not pos.get("trailing_aktif")):
+        sl_be = harga_beli * (1 + BREAKEVEN_BUFFER / 100)
+        if sl_be > sl_saat_ini:
+            posisi_spot[symbol]["stop_loss"]       = sl_be
+            posisi_spot[symbol]["breakeven_aktif"] = True
+            updated = True
+            be_msg = (
+                f"🔒 <b>Break-Even Aktif — {symbol}</b>\n"
+                f"📈 Profit: +{profit_pct:.2f}%\n"
+                f"🛡️ SL: ${sl_be:,.4f} (+{BREAKEVEN_BUFFER}% entry)\n"
+                f"✅ Posisi tidak bisa rugi!"
+            )
+            kirim_telegram(be_msg)
+            print(f"  🔒 [{symbol}] Break-even aktif @ ${sl_be:,.4f}")
+
+    # ── STEP 1.5: Partial Close ───────────────
+    # Jual sebagian saat profit 2% untuk lock profit
+    if (PARTIAL_CLOSE_AKTIF and
+            profit_pct >= PARTIAL_CLOSE_PROFIT and
+            not pos.get("partial_close_done") and
+            not is_paper_mode()):
+        try:
+            qty_total   = pos.get("qty", 0)
+            qty_partial = round(qty_total * PARTIAL_CLOSE_PCT, 8)
+            if qty_partial > 0:
+                client.order_market_sell(symbol=symbol, quantity=qty_partial)
+                qty_sisa  = round(qty_total - qty_partial, 8)
+                profit_usd= qty_partial * harga_skrng * (profit_pct/100)
+                posisi_spot[symbol]["qty"]                = qty_sisa
+                posisi_spot[symbol]["partial_close_done"] = True
+                posisi_spot[symbol]["partial_profit_locked"] = round(profit_usd, 2)
+                simpan_posisi_state()
+                kirim_telegram(
+                    f"✂️ <b>Partial Close — {symbol}</b>\n"
+                    f"📈 Profit saat ini: +{profit_pct:.2f}%\n"
+                    f"💰 Dijual: {PARTIAL_CLOSE_PCT:.0%} posisi "
+                    f"(qty: {qty_partial:.6f})\n"
+                    f"🔒 Profit dikunci: ~${profit_usd:.2f}\n"
+                    f"📌 Sisa posisi: {qty_sisa:.6f} + trailing stop"
+                )
+                print(f"  ✂️  [{symbol}] Partial close {PARTIAL_CLOSE_PCT:.0%} "
+                      f"@ ${harga_skrng:,.4f} | "
+                      f"Profit dikunci: ${profit_usd:.2f}")
+        except Exception as _e:
+            print(f"  ⚠️  [{symbol}] Partial close error: {_e}")
+
+    # ── STEP 2: Trailing Stop ──────────────────
+    # Aktif saat profit >= TRAILING_AKTIVASI (default 1.5%)
+    # SL mengikuti harga tertinggi - TRAILING_JARAK (1%)
+    if profit_pct >= TRAILING_AKTIVASI:
+        if not pos.get("trailing_aktif"):
+            posisi_spot[symbol]["trailing_aktif"] = True
+            kirim_telegram(
+                f"🔄 <b>Trailing Aktif — {symbol}</b>\n"
+                f"📈 Profit: +{profit_pct:.2f}%\n"
+                f"🔄 SL mengikuti harga tertinggi - {TRAILING_JARAK}%"
+            )
+
+        # Update SL trailing
+        sl_trail = harga_tinggi * (1 - TRAILING_JARAK / 100)
+        sl_trail = max(sl_trail, pos.get("stop_loss", 0))  # SL hanya bisa naik
+        if sl_trail > pos["stop_loss"]:
+            posisi_spot[symbol]["stop_loss"] = sl_trail
+            updated = True
+
+    # Auto-save state jika ada perubahan SL
+    if updated:
+        try:
+            simpan_posisi_state()
+        except Exception:  # non-critical
+            pass
+    return updated
 
 # ── PREDIKSI ML ───────────────────────────────
 def prediksi_ml(df, df_4h=None, df_1d=None):
@@ -1253,18 +1342,12 @@ def cek_semua_sl_tp_spot():
 
         profit_pct=((harga-pos["harga_beli"])/pos["harga_beli"])*100
         update_trailing_spot(symbol,harga)
-        trail=" 🔄" if pos.get("trailing_aktif") else ""
-        sl_mode=f"[{pos.get('sl_kondisi','?')}]"
-        pyr_info=get_pyramid_info(symbol)
-        # Drawdown tracker
-        dd_info = hitung_drawdown_posisi(pos, harga)
-        dd_str  = f" | DD:{dd_info['drawdown_pct']:+.1f}%" if dd_info["perlu_review"] else ""
-        print(f"  💰 {symbol}: ${harga:,.4f} | P/L:{profit_pct:+.2f}%{trail} {sl_mode}{pyr_info}{dd_str}")
-
-        early=cek_early_exit(symbol,pos,client)
-        if early["exit_sekarang"] and profit_pct>0:
-            try: client.order_market_sell(symbol=symbol,quantity=pos["qty"])
-            except Exception as e: print(f"  ⚠️  Gagal sell: {e}")
+        if pos.get("trailing_aktif"):
+            trail = " 🔄"
+        elif pos.get("breakeven_aktif"):
+            trail = " 🔒"
+        else:
+            trail = ""
             simpan_transaksi(symbol,pos["harga_beli"],harga,pos["waktu_beli"],waktu,"EARLY_EXIT")
             reset_pyramid(symbol)
             kirim_telegram(
@@ -1642,11 +1725,18 @@ def print_status_spot():
         try:
             harga=float(client.get_symbol_ticker(symbol=symbol)["price"])
             pl_pct=((harga-pos["harga_beli"])/pos["harga_beli"])*100
-            trail=" 🔄" if pos.get("trailing_aktif") else ""
-            print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:14} "
-                  f"${pos['harga_beli']:,.4f}→${harga:,.4f} "
-                  f"P/L:{pl_pct:+.2f}%{trail}")
-        except Exception as _e: pass  # display only, non-critical
+        except Exception as _e: pass  # price fetch
+        if pos.get("trailing_aktif"):
+            trail = " 🔄"
+        elif pos.get("breakeven_aktif"):
+            trail = " 🔒"
+        else:
+            trail = ""
+        be_tag = " 🔒" if pos.get("breakeven_aktif") else ""
+        pc_tag = " ✂️" if pos.get("partial_close_done") else ""
+        print(f"  {'📈' if pl_pct>=0 else '📉'} {symbol:14} "
+              f"${pos['harga_beli']:,.4f}→${harga:,.4f} "
+              f"P/L:{pl_pct:+.2f}%{trail}{be_tag}{pc_tag}")
 
 # ══════════════════════════════════════════════
 # FIX 3: DUAL-SPEED SCAN LOOP
