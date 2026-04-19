@@ -1,510 +1,378 @@
 # ============================================
-# WEB DASHBOARD TRADING BOT
-# Akses via browser: http://localhost:5000
+# WEB DASHBOARD v2.0 — Railway Ready
+# Pure Python HTTP server — tanpa Flask/SocketIO
+# Auto-refresh setiap 30 detik
+#
+# Akses: https://your-railway-url.railway.app
 # ============================================
 
-from flask import Flask, render_template_string
-from flask_socketio import SocketIO
-import threading
-import json
-import os
-import time
+import json, os, time, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
+from pathlib import Path
 
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+PORT       = int(os.environ.get("PORT", 8080))
+BASE_DIR   = Path(__file__).parent
+AUTO_REFRESH = 30  # detik
 
-# ── HTML DASHBOARD ────────────────────────────
-HTML = '''
-<!DOCTYPE html>
+# ══════════════════════════════════════════════
+# DATA LOADER
+# ══════════════════════════════════════════════
+
+def load_data():
+    data = {
+        "posisi"    : {},
+        "riwayat"   : [],
+        "paper_state": {},
+        "risk_state" : {},
+        "bot_status" : {},
+        "alpha_ic"   : {},
+        "waktu"      : datetime.now().strftime("%d %b %Y %H:%M:%S"),
+    }
+    # Posisi aktif
+    for fname in ["posisi_state.json", "paper_state.json"]:
+        fpath = BASE_DIR / fname
+        if fpath.exists():
+            try:
+                d = json.loads(fpath.read_text())
+                if fname == "posisi_state.json":
+                    data["posisi"] = d.get("posisi_spot", {})
+                else:
+                    data["paper_state"] = d
+            except Exception:
+                pass
+
+    # Riwayat trade
+    riwayat_file = BASE_DIR / "riwayat_trade.json"
+    if riwayat_file.exists():
+        try:
+            data["riwayat"] = json.loads(riwayat_file.read_text())[-50:]
+        except Exception:
+            pass
+
+    # Risk state
+    risk_file = BASE_DIR / "risk_state.json"
+    if risk_file.exists():
+        try:
+            data["risk_state"] = json.loads(risk_file.read_text())
+        except Exception:
+            pass
+
+    # Alpha IC
+    alpha_file = BASE_DIR / "alpha_ic.json"
+    if alpha_file.exists():
+        try:
+            data["alpha_ic"] = json.loads(alpha_file.read_text())
+        except Exception:
+            pass
+
+    return data
+
+
+def hitung_stats(riwayat):
+    if not riwayat:
+        return {}
+    profits   = [t["profit_pct"] for t in riwayat if "profit_pct" in t]
+    if not profits:
+        return {}
+    import math
+    menang    = sum(1 for p in profits if p > 0)
+    total_pl  = sum(profits)
+    win_rate  = menang / len(profits) * 100
+    avg_win   = sum(p for p in profits if p>0) / max(1, menang)
+    avg_loss  = sum(p for p in profits if p<=0) / max(1, len(profits)-menang)
+    # Max drawdown
+    import numpy as np
+    arr    = np.array(profits)
+    cumsum = np.cumsum(arr)
+    peak   = np.maximum.accumulate(cumsum)
+    max_dd = float(np.min(cumsum - peak))
+    return {
+        "n"        : len(profits),
+        "menang"   : menang,
+        "win_rate" : round(win_rate, 1),
+        "total_pl" : round(total_pl, 2),
+        "avg_win"  : round(avg_win, 2),
+        "avg_loss" : round(avg_loss, 2),
+        "max_dd"   : round(max_dd, 2),
+    }
+
+
+# ══════════════════════════════════════════════
+# HTML TEMPLATE
+# ══════════════════════════════════════════════
+
+def render_html(data):
+    stats    = hitung_stats(data["riwayat"])
+    paper    = data.get("paper_state", {})
+    risk     = data.get("risk_state", {})
+    posisi   = data.get("posisi", {})
+    riwayat  = data.get("riwayat", [])
+    alpha_ic = data.get("alpha_ic", {})
+
+    # Paper mode info
+    paper_modal  = paper.get("modal_awal", 5000)
+    paper_saldo  = paper.get("saldo_usdt", paper_modal)
+    paper_pl     = round((paper_saldo - paper_modal) / paper_modal * 100, 2) if paper_modal else 0
+    paper_trades = len(paper.get("riwayat", []))
+    paper_live   = paper.get("live_mode", False)
+
+    # Risk info
+    konsekutif   = risk.get("konsekutif_loss", 0)
+    sizing_f     = 1.0 - (0.5 if konsekutif >= 3 else 0)
+
+    # Build posisi rows
+    posisi_rows = ""
+    posisi_aktif = [(s, p) for s, p in posisi.items() if p.get("aktif")]
+    if posisi_aktif:
+        for sym, pos in posisi_aktif:
+            harga_beli  = pos.get("harga_beli", 0)
+            sl          = pos.get("stop_loss", 0)
+            tp          = pos.get("take_profit", 0)
+            modal       = pos.get("modal", 0)
+            waktu_beli  = pos.get("waktu_beli", "")[:16]
+            be_aktif    = pos.get("breakeven_aktif", False)
+            partial     = pos.get("partial_close_done", False)
+            trailing    = pos.get("trailing_aktif", False)
+
+            sl_pct = abs(harga_beli - sl) / harga_beli * 100 if harga_beli else 0
+            badges = ""
+            if be_aktif: badges += '<span class="badge be">🔒 BE</span>'
+            if trailing: badges += '<span class="badge tr">🔄 Trail</span>'
+            if partial:  badges += '<span class="badge pc">✂️ Partial</span>'
+
+            posisi_rows += f"""
+            <tr>
+                <td><b>{sym}</b></td>
+                <td>${harga_beli:,.4f}</td>
+                <td>${sl:,.4f} <small>(-{sl_pct:.1f}%)</small></td>
+                <td>${tp:,.4f}</td>
+                <td>${modal:.0f}</td>
+                <td>{waktu_beli}</td>
+                <td>{badges}</td>
+            </tr>"""
+    else:
+        posisi_rows = '<tr><td colspan="7" style="text-align:center;color:#666">Tidak ada posisi aktif</td></tr>'
+
+    # Build riwayat rows (10 terakhir)
+    riwayat_rows = ""
+    for t in reversed(riwayat[-10:]):
+        pl    = t.get("profit_pct", 0)
+        color = "#2ea043" if pl > 0 else "#f85149"
+        em    = "▲" if pl > 0 else "▼"
+        riwayat_rows += f"""
+        <tr>
+            <td>{t.get("symbol","?")}</td>
+            <td>{t.get("waktu_jual","")[:16]}</td>
+            <td style="color:{color}">{em} {pl:+.2f}%</td>
+            <td>{t.get("alasan","?")}</td>
+        </tr>"""
+
+    # Build alpha rows (top 8)
+    alpha_rows = ""
+    alpha_sorted = sorted(
+        [(k, v) for k, v in alpha_ic.items() if isinstance(v, dict)],
+        key=lambda x: x[1].get("ic_mean", 0), reverse=True
+    )[:8]
+    for name, ic_data in alpha_sorted:
+        ic   = ic_data.get("ic_mean", 0)
+        aktif= ic_data.get("aktif", True)
+        n    = ic_data.get("n_prediksi", 0)
+        color= "#2ea043" if ic > 0.05 else ("#f85149" if ic < -0.02 else "#888")
+        status_dot = "🟢" if aktif else "🔴"
+        bar_w = max(0, min(100, int(ic * 500 + 50)))
+        alpha_rows += f"""
+        <tr>
+            <td>{status_dot} {name[:22]}</td>
+            <td style="color:{color}">{ic:+.3f}</td>
+            <td>{n}</td>
+            <td><div style="background:{color};height:8px;width:{bar_w}px;border-radius:4px"></div></td>
+        </tr>"""
+
+    mode_badge = ('<span style="background:#f85149;padding:4px 12px;border-radius:20px;font-size:12px">🔴 LIVE</span>'
+                  if paper_live else
+                  '<span style="background:#388bfd;padding:4px 12px;border-radius:20px;font-size:12px">📝 PAPER</span>')
+
+    return f"""<!DOCTYPE html>
 <html lang="id">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Bot Dashboard</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: #0d1117;
-            color: #e6edf3;
-            font-family: 'Segoe UI', sans-serif;
-            padding: 20px;
-        }
-        h1 {
-            text-align: center;
-            color: #58a6ff;
-            font-size: 24px;
-            margin-bottom: 20px;
-            padding: 15px;
-            border-bottom: 1px solid #30363d;
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        .card {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 10px;
-            padding: 20px;
-            text-align: center;
-        }
-        .card .label {
-            color: #8b949e;
-            font-size: 12px;
-            margin-bottom: 8px;
-        }
-        .card .value {
-            font-size: 22px;
-            font-weight: bold;
-        }
-        .green  { color: #2ecc71; }
-        .red    { color: #e74c3c; }
-        .blue   { color: #58a6ff; }
-        .gold   { color: #f39c12; }
-        .white  { color: #e6edf3; }
-
-        .chart-container {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        .chart-container h3 {
-            color: #8b949e;
-            font-size: 14px;
-            margin-bottom: 15px;
-        }
-
-        .skor-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        .skor-card {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 10px;
-            padding: 20px;
-        }
-        .skor-card h3 {
-            font-size: 14px;
-            margin-bottom: 15px;
-            color: #8b949e;
-        }
-        .skor-bar {
-            display: flex;
-            align-items: center;
-            margin-bottom: 10px;
-            gap: 10px;
-        }
-        .skor-label {
-            width: 120px;
-            font-size: 12px;
-            color: #8b949e;
-        }
-        .skor-fill {
-            height: 8px;
-            border-radius: 4px;
-            transition: width 0.5s;
-        }
-        .skor-num {
-            font-size: 12px;
-            color: #e6edf3;
-            width: 30px;
-        }
-
-        .tabel-container {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 20px;
-            overflow-x: auto;
-        }
-        .tabel-container h3 {
-            color: #8b949e;
-            font-size: 14px;
-            margin-bottom: 15px;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-        }
-        th {
-            background: #0d1117;
-            padding: 10px;
-            text-align: left;
-            color: #8b949e;
-            border-bottom: 1px solid #30363d;
-        }
-        td {
-            padding: 10px;
-            border-bottom: 1px solid #21262d;
-        }
-        tr:hover { background: #1c2128; }
-
-        .badge {
-            padding: 3px 10px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: bold;
-        }
-        .badge-buy    { background: #1a4731; color: #2ecc71; }
-        .badge-sell   { background: #4a1a1a; color: #e74c3c; }
-        .badge-hold   { background: #1a2a4a; color: #58a6ff; }
-        .badge-profit { background: #1a4731; color: #2ecc71; }
-        .badge-loss   { background: #4a1a1a; color: #e74c3c; }
-        .badge-tp     { background: #1a3a4a; color: #58a6ff; }
-        .badge-sl     { background: #4a2a1a; color: #f39c12; }
-
-        .status-dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #2ecc71;
-            animation: pulse 1.5s infinite;
-            margin-right: 6px;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-
-        .log-container {
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 10px;
-            padding: 15px;
-            height: 200px;
-            overflow-y: auto;
-            font-family: monospace;
-            font-size: 12px;
-        }
-        .log-item {
-            padding: 3px 0;
-            border-bottom: 1px solid #21262d;
-            color: #8b949e;
-        }
-        .log-item.buy  { color: #2ecc71; }
-        .log-item.sell { color: #e74c3c; }
-        .log-item.err  { color: #f39c12; }
-
-        footer {
-            text-align: center;
-            color: #8b949e;
-            font-size: 11px;
-            margin-top: 20px;
-            padding-top: 15px;
-            border-top: 1px solid #30363d;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="{AUTO_REFRESH}">
+<title>Trading Bot Dashboard</title>
+<style>
+  * {{ box-sizing:border-box; margin:0; padding:0 }}
+  body {{ background:#0d1117; color:#e6edf3; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px }}
+  .header {{ background:#161b22; border-bottom:1px solid #30363d; padding:16px 24px; display:flex; align-items:center; justify-content:space-between }}
+  .header h1 {{ font-size:18px; font-weight:600 }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; padding:20px 24px }}
+  .card {{ background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px }}
+  .card h3 {{ font-size:12px; color:#8b949e; text-transform:uppercase; margin-bottom:12px; letter-spacing:.5px }}
+  .metric {{ font-size:28px; font-weight:700; margin-bottom:4px }}
+  .sub {{ font-size:12px; color:#8b949e }}
+  .green {{ color:#2ea043 }} .red {{ color:#f85149 }} .blue {{ color:#388bfd }} .yellow {{ color:#d29922 }}
+  .section {{ padding:0 24px 20px }}
+  .section h2 {{ font-size:15px; font-weight:600; margin-bottom:12px; color:#8b949e }}
+  table {{ width:100%; border-collapse:collapse }}
+  th {{ background:#0d1117; color:#8b949e; font-size:11px; text-transform:uppercase; padding:8px 12px; text-align:left; letter-spacing:.5px }}
+  td {{ padding:8px 12px; border-bottom:1px solid #21262d; font-size:13px }}
+  tr:hover td {{ background:#1c2128 }}
+  .badge {{ display:inline-block; font-size:11px; padding:2px 8px; border-radius:12px; margin:0 2px }}
+  .be {{ background:#1f3a1f; color:#2ea043 }}
+  .tr {{ background:#1a2535; color:#388bfd }}
+  .pc {{ background:#2d2000; color:#d29922 }}
+  .footer {{ text-align:center; padding:20px; color:#484f58; font-size:12px }}
+</style>
 </head>
 <body>
-    <h1>🤖 Trading Bot Dashboard - BTC/USDT</h1>
 
-    <!-- Status Cards -->
-    <div class="grid">
-        <div class="card">
-            <div class="label">STATUS BOT</div>
-            <div class="value">
-                <span class="status-dot"></span>
-                <span class="green" id="status-bot">AKTIF</span>
-            </div>
-        </div>
-        <div class="card">
-            <div class="label">HARGA BTC</div>
-            <div class="value blue" id="harga">$0.00</div>
-        </div>
-        <div class="card">
-            <div class="label">SINYAL</div>
-            <div class="value" id="sinyal">-</div>
-        </div>
-        <div class="card">
-            <div class="label">SKOR BUY</div>
-            <div class="value green" id="skor-buy">0/8</div>
-        </div>
-        <div class="card">
-            <div class="label">SKOR SELL</div>
-            <div class="value red" id="skor-sell">0/8</div>
-        </div>
-        <div class="card">
-            <div class="label">ML PREDIKSI</div>
-            <div class="value gold" id="ml-pred">-</div>
-        </div>
-        <div class="card">
-            <div class="label">SALDO USDT</div>
-            <div class="value white" id="saldo-usdt">0.00</div>
-        </div>
-        <div class="card">
-            <div class="label">SALDO BTC</div>
-            <div class="value white" id="saldo-btc">0.00</div>
-        </div>
-    </div>
+<div class="header">
+  <h1>🤖 Trading Bot Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:12px">
+    {mode_badge}
+    <span style="color:#484f58;font-size:12px">Auto-refresh {AUTO_REFRESH}s | {data['waktu']}</span>
+  </div>
+</div>
 
-    <!-- Grafik Harga -->
-    <div class="chart-container">
-        <h3>📈 Grafik Harga BTC (Real-time)</h3>
-        <canvas id="hargaChart" height="80"></canvas>
-    </div>
+<div class="grid">
+  <div class="card">
+    <h3>Mode Trading</h3>
+    <div class="metric">{"LIVE" if paper_live else "PAPER"}</div>
+    <div class="sub">{"Uang nyata aktif" if paper_live else "Simulasi - aman"}</div>
+  </div>
+  <div class="card">
+    <h3>Saldo</h3>
+    <div class="metric {'green' if paper_pl>=0 else 'red'}">${paper_saldo:,.2f}</div>
+    <div class="sub">Modal: ${paper_modal:,.0f} | P/L: {paper_pl:+.2f}%</div>
+  </div>
+  <div class="card">
+    <h3>Posisi Aktif</h3>
+    <div class="metric blue">{len(posisi_aktif)}</div>
+    <div class="sub">Max 3 posisi spot</div>
+  </div>
+  <div class="card">
+    <h3>Total Trade</h3>
+    <div class="metric">{stats.get('n', paper_trades)}</div>
+    <div class="sub">Win rate: {stats.get('win_rate', 0):.1f}%</div>
+  </div>
+  <div class="card">
+    <h3>P/L Total</h3>
+    <div class="metric {'green' if stats.get('total_pl',0)>=0 else 'red'}">{stats.get('total_pl', 0):+.2f}%</div>
+    <div class="sub">Avg win: +{stats.get('avg_win',0):.2f}% | loss: {stats.get('avg_loss',0):.2f}%</div>
+  </div>
+  <div class="card">
+    <h3>Max Drawdown</h3>
+    <div class="metric red">{stats.get('max_dd', 0):.2f}%</div>
+    <div class="sub">Limit: -15%</div>
+  </div>
+  <div class="card">
+    <h3>Sizing Factor</h3>
+    <div class="metric {'yellow' if sizing_f<1 else 'green'}">{sizing_f:.0%}</div>
+    <div class="sub">Loss berturut: {konsekutif}x</div>
+  </div>
+  <div class="card">
+    <h3>Alpha Engine</h3>
+    <div class="metric blue">{len(alpha_ic)}</div>
+    <div class="sub">Alpha factors aktif</div>
+  </div>
+</div>
 
-    <!-- Posisi Aktif -->
-    <div id="posisi-container" style="display:none; margin-bottom:20px;">
-        <div class="card" style="text-align:left;">
-            <div class="label" style="margin-bottom:10px;">📊 POSISI AKTIF</div>
-            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:10px;">
-                <div><div class="label">Harga Beli</div><div class="value blue" id="pos-beli">-</div></div>
-                <div><div class="label">Stop Loss</div><div class="value red" id="pos-sl">-</div></div>
-                <div><div class="label">Take Profit</div><div class="value green" id="pos-tp">-</div></div>
-                <div><div class="label">P/L Saat Ini</div><div class="value" id="pos-pl">-</div></div>
-            </div>
-        </div>
-    </div>
+<div class="section">
+  <h2>📌 Posisi Aktif</h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden">
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th>Entry</th><th>Stop Loss</th>
+      <th>Take Profit</th><th>Modal</th><th>Waktu</th><th>Status</th>
+    </tr></thead>
+    <tbody>{posisi_rows}</tbody>
+  </table>
+  </div>
+</div>
 
-    <!-- Skor Indikator -->
-    <div class="skor-grid">
-        <div class="skor-card">
-            <h3>🟢 Konfirmasi BUY</h3>
-            <div id="detail-buy"></div>
-        </div>
-        <div class="skor-card">
-            <h3>🔴 Konfirmasi SELL</h3>
-            <div id="detail-sell"></div>
-        </div>
-    </div>
+<div class="section">
+  <h2 style="margin-top:20px">📋 Riwayat Trade (10 Terakhir)</h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden">
+  <table>
+    <thead><tr><th>Symbol</th><th>Waktu</th><th>P/L</th><th>Alasan</th></tr></thead>
+    <tbody>{riwayat_rows if riwayat_rows else "<tr><td colspan=4 style='text-align:center;color:#666'>Belum ada trade</td></tr>"}</tbody>
+  </table>
+  </div>
+</div>
 
-    <!-- Riwayat Transaksi -->
-    <div class="tabel-container">
-        <h3>📋 Riwayat Transaksi</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>No</th>
-                    <th>Waktu Beli</th>
-                    <th>Harga Beli</th>
-                    <th>Harga Jual</th>
-                    <th>P/L</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody id="tabel-transaksi">
-                <tr><td colspan="6" style="text-align:center; color:#8b949e;">
-                    Belum ada transaksi
-                </td></tr>
-            </tbody>
-        </table>
-    </div>
+<div class="section">
+  <h2 style="margin-top:20px">🔬 Alpha IC Ranking</h2>
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden">
+  <table>
+    <thead><tr><th>Alpha Factor</th><th>IC</th><th>N Trade</th><th>Strength</th></tr></thead>
+    <tbody>{alpha_rows if alpha_rows else "<tr><td colspan=4 style='text-align:center;color:#666'>Belum ada data IC</td></tr>"}</tbody>
+  </table>
+  </div>
+</div>
 
-    <!-- Log Activity -->
-    <div class="tabel-container">
-        <h3>📝 Log Aktivitas</h3>
-        <div class="log-container" id="log-container"></div>
-    </div>
+<div class="footer">
+  🤖 Trading Bot AI — Quant Edition | Railway Cloud | Auto-refresh {AUTO_REFRESH}s
+</div>
+</body></html>"""
 
-    <footer>
-        Trading Bot v6.0 — Update setiap 5 detik
-        | <span id="last-update">-</span>
-    </footer>
 
-    <script>
-        const socket = io();
+# ══════════════════════════════════════════════
+# HTTP SERVER
+# ══════════════════════════════════════════════
 
-        // ── Grafik Harga ──
-        const ctx = document.getElementById('hargaChart').getContext('2d');
-        const hargaChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: [{
-                    label: 'BTC/USDT',
-                    data: [],
-                    borderColor: '#58a6ff',
-                    backgroundColor: 'rgba(88,166,255,0.1)',
-                    borderWidth: 2,
-                    pointRadius: 3,
-                    tension: 0.3,
-                    fill: true
-                }]
-            },
-            options: {
-                responsive: true,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: {
-                        ticks: { color: '#8b949e', maxTicksLimit: 8 },
-                        grid:  { color: '#21262d' }
-                    },
-                    y: {
-                        ticks: {
-                            color: '#8b949e',
-                            callback: v => '$' + v.toLocaleString()
-                        },
-                        grid: { color: '#21262d' }
-                    }
-                }
-            }
-        });
+class DashboardHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # suppress access logs
 
-        // ── Update Data dari Server ──
-        socket.on('update_data', function(data) {
-            // Cards
-            const h = parseFloat(data.harga);
-            document.getElementById('harga').textContent =
-                '$' + h.toLocaleString('en-US', {minimumFractionDigits:2});
+    def do_GET(self):
+        if self.path in ('/', '/dashboard'):
+            data    = load_data()
+            html    = render_html(data)
+            body    = html.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-            // Sinyal
-            const sEl = document.getElementById('sinyal');
-            sEl.textContent = data.sinyal;
-            sEl.className = 'value ' +
-                (data.sinyal === 'BUY' ? 'green' :
-                 data.sinyal === 'SELL' ? 'red' : 'blue');
+        elif self.path == '/api/data':
+            data = load_data()
+            body = json.dumps({
+                "posisi"   : data["posisi"],
+                "stats"    : hitung_stats(data["riwayat"]),
+                "waktu"    : data["waktu"],
+            }, ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-            document.getElementById('skor-buy').textContent  = data.skor_buy + '/8';
-            document.getElementById('skor-sell').textContent = data.skor_sell + '/8';
-            document.getElementById('ml-pred').textContent   =
-                data.ml_pred + ' (' + data.ml_conf + '%)';
-            document.getElementById('saldo-usdt').textContent =
-                parseFloat(data.saldo_usdt).toFixed(2);
-            document.getElementById('saldo-btc').textContent =
-                parseFloat(data.saldo_btc).toFixed(8);
+        elif self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
 
-            // Grafik
-            const now = new Date().toLocaleTimeString('id-ID');
-            hargaChart.data.labels.push(now);
-            hargaChart.data.datasets[0].data.push(h);
-            if (hargaChart.data.labels.length > 30) {
-                hargaChart.data.labels.shift();
-                hargaChart.data.datasets[0].data.shift();
-            }
-            hargaChart.update();
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-            // Posisi aktif
-            if (data.posisi_aktif) {
-                document.getElementById('posisi-container').style.display = 'block';
-                document.getElementById('pos-beli').textContent =
-                    '$' + parseFloat(data.harga_beli).toLocaleString();
-                document.getElementById('pos-sl').textContent =
-                    '$' + parseFloat(data.stop_loss).toLocaleString();
-                document.getElementById('pos-tp').textContent =
-                    '$' + parseFloat(data.take_profit).toLocaleString();
-                const pl = parseFloat(data.pl_pct);
-                const plEl = document.getElementById('pos-pl');
-                plEl.textContent   = (pl >= 0 ? '+' : '') + pl.toFixed(2) + '%';
-                plEl.className = 'value ' + (pl >= 0 ? 'green' : 'red');
-            } else {
-                document.getElementById('posisi-container').style.display = 'none';
-            }
 
-            // Detail indikator
-            const buyDiv  = document.getElementById('detail-buy');
-            const sellDiv = document.getElementById('detail-sell');
-            buyDiv.innerHTML  = data.detail_buy.map(d =>
-                `<div style="font-size:12px;padding:4px 0;color:#2ecc71">${d}</div>`
-            ).join('') || '<div style="color:#8b949e;font-size:12px">Tidak ada sinyal</div>';
-            sellDiv.innerHTML = data.detail_sell.map(d =>
-                `<div style="font-size:12px;padding:4px 0;color:#e74c3c">${d}</div>`
-            ).join('') || '<div style="color:#8b949e;font-size:12px">Tidak ada sinyal</div>';
-
-            // Last update
-            document.getElementById('last-update').textContent =
-                'Update: ' + new Date().toLocaleTimeString('id-ID');
-        });
-
-        // ── Update Transaksi ──
-        socket.on('update_transaksi', function(trades) {
-            const tbody = document.getElementById('tabel-transaksi');
-            if (trades.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#8b949e">Belum ada transaksi</td></tr>';
-                return;
-            }
-            tbody.innerHTML = trades.slice().reverse().map((t, i) => {
-                const pl = parseFloat(t.profit_pct);
-                const badge = pl > 0
-                    ? '<span class="badge badge-profit">✅ PROFIT</span>'
-                    : '<span class="badge badge-loss">❌ LOSS</span>';
-                const alasan = t.alasan === 'TAKE_PROFIT'
-                    ? '<span class="badge badge-tp">🎯 TP</span>'
-                    : '<span class="badge badge-sl">🛑 SL</span>';
-                return `<tr>
-                    <td>${trades.length - i}</td>
-                    <td>${t.waktu_beli}</td>
-                    <td>$${parseFloat(t.harga_beli).toLocaleString()}</td>
-                    <td>$${parseFloat(t.harga_jual).toLocaleString()}</td>
-                    <td class="${pl >= 0 ? 'green' : 'red'}">${pl >= 0 ? '+' : ''}${pl.toFixed(2)}%</td>
-                    <td>${badge} ${alasan}</td>
-                </tr>`;
-            }).join('');
-        });
-
-        // ── Log Aktivitas ──
-        socket.on('log', function(data) {
-            const container = document.getElementById('log-container');
-            const div = document.createElement('div');
-            div.className = 'log-item ' + (data.type || '');
-            div.textContent = data.waktu + ' | ' + data.pesan;
-            container.insertBefore(div, container.firstChild);
-            if (container.children.length > 50) {
-                container.removeChild(container.lastChild);
-            }
-        });
-    </script>
-</body>
-</html>
-'''
-
-# ── BACA DATA BOT ─────────────────────────────
-def baca_status():
+def mulai_dashboard(port=PORT):
+    """Mulai dashboard di background thread."""
     try:
-        if os.path.exists("bot_status.json"):
-            with open("bot_status.json", "r") as f:
-                return json.load(f)
-    except:
-        pass
-    return {}
+        server = HTTPServer(('0.0.0.0', port), DashboardHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"  🌐 Dashboard: http://0.0.0.0:{port}")
+        return server
+    except Exception as e:
+        print(f"  ⚠️  Dashboard error: {e}")
+        return None
 
-def baca_transaksi():
-    try:
-        if os.path.exists("riwayat_trade.json"):
-            with open("riwayat_trade.json", "r") as f:
-                return json.load(f)
-    except:
-        pass
-    return []
 
-# ── BROADCAST DATA KE BROWSER ─────────────────
-def broadcast_loop():
-    while True:
-        try:
-            status    = baca_status()
-            transaksi = baca_transaksi()
-
-            if status:
-                socketio.emit('update_data', status)
-                socketio.emit('update_transaksi', transaksi)
-
-        except Exception as e:
-            print(f"Broadcast error: {e}")
-
-        time.sleep(5)
-
-# ── ROUTE ─────────────────────────────────────
-@app.route('/')
-def index():
-    return render_template_string(HTML)
-
-# ── MAIN ──────────────────────────────────────
 if __name__ == '__main__':
-    t = threading.Thread(target=broadcast_loop, daemon=True)
-    t.start()
-    print("=" * 45)
-    print("   WEB DASHBOARD TRADING BOT")
-    print("   Buka browser: http://localhost:5000")
-    print("=" * 45)
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    print(f"Starting dashboard on port {PORT}...")
+    server = HTTPServer(('0.0.0.0', PORT), DashboardHandler)
+    print(f"✅ Dashboard running: http://0.0.0.0:{PORT}")
+    server.serve_forever()

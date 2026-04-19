@@ -50,6 +50,7 @@ from alpha_engine import (
     hitung_alpha_score, catat_alpha_result
 )
 from telegram_bot import mulai_polling, hentikan_polling, is_paused
+from dashboard import mulai_dashboard
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
     get_total_portfolio, format_portfolio_message,
@@ -600,14 +601,23 @@ def load_model():
 # FIX 5: DYNAMIC COIN LIST
 # ══════════════════════════════════════════════
 
-def get_top_koin_by_volume():
+def get_top_koin_by_volume(n=30):
+    """
+    Ambil top koin berdasarkan volume + relative strength.
+    Menggunakan smart scoring: volume, momentum, RS vs BTC, volatility.
+    Cache 15 menit untuk efisiensi.
+    """
     global koin_cache
     sekarang = time.time()
     if koin_cache["data"] and sekarang - koin_cache["waktu"] < 900:
         return koin_cache["data"]
-    print("\n  🔄 Refresh daftar koin...")
+
+    print("\n  🔄 Refresh smart koin universe...")
     try:
         tickers    = client.get_ticker()
+        btc_ticker = next((t for t in tickers if t["symbol"]=="BTCUSDT"), None)
+        btc_change = float(btc_ticker["priceChangePercent"]) if btc_ticker else 0
+
         usdt_pairs = []
         for t in tickers:
             symbol = t["symbol"]
@@ -615,88 +625,87 @@ def get_top_koin_by_volume():
             if symbol in KOIN_BLACKLIST: continue
             base = symbol.replace("USDT","")
             if any(x in base for x in ["UP","DOWN","BULL","BEAR","3L","3S"]): continue
-            harga = float(t.get("lastPrice",0))
-            vol   = float(t.get("quoteVolume",0))
-            if harga < MIN_HARGA or vol < MIN_VOLUME_USD: continue
-            usdt_pairs.append({"symbol":symbol,"volume_usd":vol})
-        usdt_pairs.sort(key=lambda x: x["volume_usd"], reverse=True)
-        top       = [p["symbol"] for p in usdt_pairs[:TOP_N_VOLUME]]
-        koin_list = list(dict.fromkeys(KOIN_PRIORITAS + top))
-        koin_cache["data"]  = koin_list
-        koin_cache["waktu"] = sekarang
-        print(f"  ✅ {len(koin_list)} koin siap discan")
-        return koin_list
+
+            try:
+                harga   = float(t["lastPrice"])
+                vol_usd = float(t["quoteVolume"])
+                change  = float(t["priceChangePercent"])
+                high_24 = float(t["highPrice"])
+                low_24  = float(t["lowPrice"])
+                count   = int(t.get("count", 0))
+            except (ValueError, KeyError):
+                continue
+
+            if harga < MIN_HARGA or vol_usd < MIN_VOLUME_USD: continue
+
+            # ── Smart Priority Score ──────────────────────
+            priority = 0.0
+
+            # 1. Volume score (log scale)
+            import math
+            vol_score = math.log10(max(vol_usd, 1)) / 8
+            priority += vol_score * 30  # max ~30 pts
+
+            # 2. Momentum score (vs 24H change)
+            if change > 0:
+                mom_score = min(change / 10, 1.0)   # cap di +10%
+                priority += mom_score * 20           # max 20 pts
+            elif change < -5:
+                priority -= 10  # penalty koin yang crash
+
+            # 3. Relative Strength vs BTC
+            rs_score = change - btc_change   # positif = outperform BTC
+            if rs_score > 0:
+                priority += min(rs_score / 5, 1.0) * 15  # max 15 pts
+
+            # 4. Volatility score (ATR proxy)
+            if high_24 > 0 and low_24 > 0:
+                atr_pct = (high_24 - low_24) / harga * 100
+                if 2 <= atr_pct <= 8:      # volatilitas optimal
+                    priority += 10
+                elif atr_pct > 15:          # terlalu volatile
+                    priority -= 10
+
+            # 5. Trade activity (count)
+            if count > 50000:   priority += 10
+            elif count > 10000: priority += 5
+
+            # 6. Boost koin prioritas
+            if symbol in KOIN_PRIORITAS:
+                priority += 15
+
+            usdt_pairs.append({
+                "symbol"   : symbol,
+                "volume"   : vol_usd,
+                "change"   : change,
+                "rs_vs_btc": round(rs_score, 2),
+                "priority" : round(priority, 2),
+                "harga"    : harga,
+            })
+
+        # Sort by priority score
+        usdt_pairs.sort(key=lambda x: x["priority"], reverse=True)
+        result = [p["symbol"] for p in usdt_pairs[:n]]
+
+        # Selalu include KOIN_PRIORITAS yang tidak masuk top N
+        for sym in KOIN_PRIORITAS[:10]:
+            if sym not in result:
+                result.append(sym)
+
+        koin_cache = {"data": result, "waktu": sekarang}
+
+        # Print top 5 dengan priority score
+        print(f"  Universe: {len(result)} koin | Top 5:")
+        for p in usdt_pairs[:5]:
+            rs_tag = f"RS:{p['rs_vs_btc']:+.1f}%" if abs(p['rs_vs_btc'])>0.5 else ""
+            print(f"    {p['symbol']:12} Vol:${p['volume']/1e6:.0f}M "
+                  f"Chg:{p['change']:+.1f}% {rs_tag} "
+                  f"Score:{p['priority']:.0f}")
+        return result
+
     except Exception as e:
         print(f"  ⚠️  Gagal refresh koin: {e}")
-        return KOIN_PRIORITAS
-
-# ── FUNGSI: AMBIL DATA ────────────────────────
-def get_data(symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=150):
-    try:
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        df = pd.DataFrame(klines, columns=[
-            'time','open','high','low','close','volume',
-            'close_time','quote_vol','trades','taker_base','taker_quote','ignore'])
-        for col in ['open','high','low','close','volume']:
-            df[col] = df[col].astype(float)
-        return df
-    except Exception as e:
-        print(f"  ⚠️  Gagal ambil {symbol}: {e}")
-        return None
-
-# ── FUNGSI: HITUNG INDIKATOR ──────────────────
-def hitung_indikator(df):
-    close=df['close'];high=df['high'];low=df['low'];volume=df['volume']
-    delta=close.diff()
-    gain=delta.where(delta>0,0).rolling(14).mean()
-    loss=(-delta.where(delta<0,0)).rolling(14).mean()
-    rsi=(100-(100/(1+gain/loss))).iloc[-1]
-    ema12=close.ewm(span=12,adjust=False).mean()
-    ema26=close.ewm(span=26,adjust=False).mean()
-    macd_line=ema12-ema26
-    signal_line=macd_line.ewm(span=9,adjust=False).mean()
-    macd_up=(macd_line.iloc[-1]>signal_line.iloc[-1] and macd_line.iloc[-2]<=signal_line.iloc[-2])
-    macd_down=(macd_line.iloc[-1]<signal_line.iloc[-1] and macd_line.iloc[-2]>=signal_line.iloc[-2])
-    sma20=close.rolling(20).mean();std20=close.rolling(20).std()
-    harga=close.iloc[-1]
-    bb_bawah=harga<=(sma20-std20*2).iloc[-1];bb_atas=harga>=(sma20+std20*2).iloc[-1]
-    tr=pd.concat([high-low,(high-close.shift()).abs(),(low-close.shift()).abs()],axis=1).max(axis=1)
-    atr=tr.rolling(14).mean().iloc[-1]
-    tenkan=(high.rolling(9).max()+low.rolling(9).min())/2
-    kijun=(high.rolling(26).max()+low.rolling(26).min())/2
-    span_a=((tenkan+kijun)/2).shift(26)
-    span_b=((high.rolling(52).max()+low.rolling(52).min())/2).shift(26)
-    ichi_atas=harga>max(span_a.iloc[-1],span_b.iloc[-1])
-    tk_up=(tenkan.iloc[-1]>kijun.iloc[-1] and tenkan.iloc[-2]<=kijun.iloc[-2])
-    vol_avg=volume.rolling(20).mean().iloc[-1];vol_skrng=volume.iloc[-1]
-    vol_tinggi=vol_skrng>(vol_avg*1.5);vol_ratio=vol_skrng/vol_avg
-    rsi_ser=100-(100/(1+gain/loss))
-    harga_r=close.iloc[-5:].values;rsi_r=rsi_ser.iloc[-5:].values
-    bull_div=harga_r[-1]<harga_r[0] and rsi_r[-1]>rsi_r[0]
-    bear_div=harga_r[-1]>harga_r[0] and rsi_r[-1]<rsi_r[0]
-    momentum_24h=((harga-close.iloc[-25])/close.iloc[-25])*100
-    ema20=close.ewm(span=20,adjust=False).mean().iloc[-1]
-    ema50=close.ewm(span=50,adjust=False).mean().iloc[-1]
-    candle_bullish=(close.iloc[-1] > df['open'].iloc[-1])
-    return {
-        "harga":harga,"rsi":rsi,"macd_up":macd_up,"macd_down":macd_down,
-        "bb_bawah":bb_bawah,"bb_atas":bb_atas,"atr":atr,
-        "ichi_atas":ichi_atas,"tk_up":tk_up,
-        "vol_tinggi":vol_tinggi,"vol_ratio":vol_ratio,
-        "bull_div":bull_div,"bear_div":bear_div,
-        "momentum":momentum_24h,"ema_bull":ema20>ema50,
-        "ema20":ema20,"ema50":ema50,
-        "candle_bullish":candle_bullish,  # ← FIX 2
-    }
-
-# ── MULTI TIMEFRAME ───────────────────────────
-def analisis_timeframe(symbol, interval, nama_tf):
-    df = get_data(symbol, interval=interval)
-    if df is None: return {"tf":nama_tf,"konfirmasi":False,"skor":0}
-    ind  = hitung_indikator(df)
-    skor = sum([ind["rsi"]<50, ind["macd_up"], ind["ema_bull"],
-                ind["ichi_atas"] or ind["tk_up"], ind["momentum"]>0])
-    return {"tf":nama_tf,"konfirmasi":skor>=3,"skor":skor,"ind":ind}
+        return koin_cache.get("data") or KOIN_PRIORITAS
 
 def multi_timeframe_analysis(symbol):
     tf_list = [(Client.KLINE_INTERVAL_1HOUR,"1H"),
@@ -2051,6 +2060,12 @@ try:
         print("  ⚠️  Telegram polling skip — token/chatid kosong")
 except Exception as e:
     print(f"  ⚠️  Telegram polling error: {e}")
+
+# ── Mulai Web Dashboard ──────────────────────
+try:
+    mulai_dashboard()
+except Exception as e:
+    print(f"  ⚠️  Dashboard error: {e}")
 
 siklus=0
 waktu_full_terakhir=time.time()
