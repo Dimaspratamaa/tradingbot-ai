@@ -51,6 +51,14 @@ from alpha_engine import (
 )
 from telegram_bot import mulai_polling, hentikan_polling, is_paused
 from dashboard import mulai_dashboard
+from polymarket import init_poly_engine, get_poly_engine
+from funding_arbitrage import jalankan_funding_scan, format_laporan as funding_laporan
+from weekly_report import cek_jadwal_weekly, jalankan_backtest_manual
+from websocket_manager import (
+    init_websocket, get_harga, get_all_tickers_ws,
+    get_spread_pct, price_cache, alert_engine,
+    ws_manager, is_ws_ready, format_ws_status
+)
 from exchange_executor import (
     eksekusi_beli_multi, eksekusi_jual_multi,
     get_total_portfolio, format_portfolio_message,
@@ -117,6 +125,10 @@ API_KEY    = os.environ.get("BINANCE_API_KEY",    "")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 TG_TOKEN   = os.environ.get("TG_TOKEN",   "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+
+# ── Polymarket credentials ────────────────────
+POLY_PRIVATE_KEY = os.environ.get("POLY_PRIVATE_KEY", "")
+POLY_AKTIF       = os.environ.get("POLY_AKTIF", "false").lower() == "true" 
 
 if not TG_TOKEN or not TG_CHAT_ID:
     print("⚠️  TG_TOKEN / TG_CHAT_ID belum diisi di .env atau Railway Variables!")
@@ -243,12 +255,17 @@ def buat_client():
     from binance.client import Client as _Client
 
     # Cek apakah di Railway (ada env variable RAILWAY_ENVIRONMENT)
-    is_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT") or
-                      os.environ.get("RAILWAY_PROJECT_ID"))
+    is_railway = bool(
+        os.environ.get("RAILWAY_ENVIRONMENT") or
+        os.environ.get("RAILWAY_PROJECT_ID") or
+        os.environ.get("RENDER") or          # Render.com
+        os.environ.get("RENDER_SERVICE_ID")  # Render.com alternative
+    )
 
     if is_railway:
-        # Railway — koneksi normal, tidak perlu workaround
-        print("  ☁️  Mode: Railway Cloud")
+        # Cloud server (Railway/Render) — koneksi normal
+        platform = "Render.com" if os.environ.get("RENDER") else "Railway Cloud"
+        print(f"  ☁️  Mode: {platform}")
         client = _Client(API_KEY, API_SECRET, testnet=False)
         client.ping()
         print("  ✅ Binance terkoneksi di Railway!")
@@ -614,7 +631,12 @@ def get_top_koin_by_volume(n=30):
 
     print("\n  🔄 Refresh smart koin universe...")
     try:
-        tickers    = client.get_ticker()
+        # WebSocket cache dulu (jauh lebih cepat dari REST)
+        if is_ws_ready():
+            tickers = get_all_tickers_ws(client)
+            print("  ⚡ [WS] Tickers dari WebSocket cache")
+        else:
+            tickers = client.get_ticker()
         btc_ticker = next((t for t in tickers if t["symbol"]=="BTCUSDT"), None)
         btc_change = float(btc_ticker["priceChangePercent"]) if btc_ticker else 0
 
@@ -1345,7 +1367,10 @@ def cek_semua_sl_tp_spot():
         pos=posisi_spot[symbol]
         if not pos["aktif"]: continue
         try:
-            harga=float(client.get_symbol_ticker(symbol=symbol)["price"])
+            # WebSocket cache dulu, fallback REST jika stale
+            harga = get_harga(symbol, client)
+            if harga <= 0:
+                raise ValueError("Harga 0")
         except Exception as e:
             print(f"  ⚠️  Gagal harga {symbol}: {e}"); continue
 
@@ -1366,7 +1391,10 @@ def cek_semua_sl_tp_spot():
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n"
                 f"📋 {early['alasan']}\n🕐 {waktu}"
             )
-            posisi_spot[symbol]["aktif"]=False; simpan_posisi_state(); continue
+            posisi_spot[symbol]["aktif"]=False; simpan_posisi_state()
+            try: alert_engine.hapus_posisi(symbol)
+            except Exception: pass
+            continue
 
         if harga>=pos["take_profit"]:
             if is_paper_mode():
@@ -1704,6 +1732,11 @@ def buka_posisi_spot(hasil):
         "modal":modal,"kelly_f":pos_info.get("kelly_f",0)
     }
     simpan_posisi_state()  # ← Persist ke disk setelah buka posisi
+    # Register ke WebSocket alert engine untuk monitoring real-time
+    try:
+        alert_engine.register_posisi(symbol, sl, tp, modal, harga)
+        ws_manager.watch_symbols([symbol])
+    except Exception: pass
 
     mtf=hasil.get("mtf",{});ob=hasil.get("ob",{})
     geo=hasil.get("geo",{});mx=hasil.get("mx",{})
@@ -1732,8 +1765,8 @@ def print_status_spot():
     print(f"  💰 Spot aktif: {len(aktif)}/{MAX_POSISI_SPOT}")
     for symbol,pos in aktif:
         try:
-            harga=float(client.get_symbol_ticker(symbol=symbol)["price"])
-            pl_pct=((harga-pos["harga_beli"])/pos["harga_beli"])*100
+            harga  = get_harga(symbol, client)
+            pl_pct = ((harga-pos["harga_beli"])/pos["harga_beli"])*100
         except Exception as _e: pass  # price fetch
         if pos.get("trailing_aktif"):
             trail = " 🔄"
@@ -2066,6 +2099,37 @@ try:
     mulai_dashboard()
 except Exception as e:
     print(f"  ⚠️  Dashboard error: {e}")
+
+# ── Mulai WebSocket Streams ──────────────────
+print("\n  📡 Starting WebSocket streams...")
+try:
+    init_websocket(client, posisi_spot)
+    # Register alert engine callbacks
+    def _ws_sl_callback(symbol, harga, pos):
+        """Dipanggil real-time saat SL hit via WebSocket."""
+        print(f"  🚨 [WS] Real-time SL hit: {symbol} @ ${harga:,.4f}")
+    def _ws_tp_callback(symbol, harga, pos):
+        """Dipanggil real-time saat TP hit via WebSocket."""
+        print(f"  🎯 [WS] Real-time TP hit: {symbol} @ ${harga:,.4f}")
+    alert_engine.on("SL_HIT", _ws_sl_callback)
+    alert_engine.on("TP_HIT", _ws_tp_callback)
+except Exception as e:
+    print(f"  ⚠️  WebSocket init error: {e}")
+    print("  ℹ️  Bot tetap jalan dengan REST API (normal)")
+
+# ── Mulai Polymarket Engine ───────────────────
+if POLY_PRIVATE_KEY and POLY_AKTIF:
+    try:
+        poly_paper = is_paper_mode()
+        init_poly_engine(client, kirim_telegram, paper_mode=poly_paper)
+        print(f"  ✅ Polymarket Engine aktif ({'PAPER' if poly_paper else 'LIVE'})")
+    except Exception as e:
+        print(f"  ⚠️  Polymarket Engine error: {e}")
+else:
+    if POLY_PRIVATE_KEY and not POLY_AKTIF:
+        print("  ⚠️  Polymarket: key ada tapi POLY_AKTIF=false")
+    else:
+        print("  ℹ️  Polymarket: belum dikonfigurasi (POLY_PRIVATE_KEY kosong)")
 
 siklus=0
 waktu_full_terakhir=time.time()

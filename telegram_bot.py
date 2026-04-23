@@ -135,6 +135,10 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
             "  /setsl X    → Set stop loss % (contoh: /setsl 2.5)\n"
             "  /settp X    → Set take profit % (contoh: /settp 5.0)\n"
             "  /mode X     → Ganti mode (scalping/swing/grid)\n"
+            f"\n🎯 <b>Polymarket:</b>\n"
+            f"  /poly     → Status Polymarket engine\n"
+            f"  /poly_on  → Aktifkan live Polymarket\n"
+            f"  /poly_off → Kembali ke paper Polymarket\n"
         )
 
     # ── /status ──
@@ -768,6 +772,94 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
         except Exception as _e:
             pass  # noqa: error logged via _e
             balas("⚠️ Format tidak valid. Contoh: /settp 5.0")
+
+
+    # ── /ws ──
+    elif command == "/ws":
+        try:
+            from websocket_manager import format_ws_status
+            balas(format_ws_status())
+        except Exception as e:
+            balas(f"⚠️ WebSocket status error: {e}")
+
+    # ── /backtest ──
+    elif command == "/backtest":
+        client = ctx.get("client")
+        if not client:
+            balas("⚠️ Bot belum terhubung ke Binance")
+        elif len(parts) >= 2 and parts[1].upper() == "ALL":
+            # /backtest all — backtest semua koin
+            import threading
+            def run_all():
+                from weekly_report import jalankan_backtest_semua
+                jalankan_backtest_semua(client, balas)
+            threading.Thread(target=run_all, daemon=True).start()
+            balas("🔄 Backtest semua koin dimulai di background...")
+        else:
+            # /backtest BTCUSDT — backtest 1 koin
+            symbol = parts[1].upper() if len(parts) >= 2 else "BTCUSDT"
+            if not symbol.endswith("USDT"):
+                symbol += "USDT"
+            import threading
+            def run_one():
+                from weekly_report import jalankan_backtest_manual
+                jalankan_backtest_manual(symbol, client, balas)
+            threading.Thread(target=run_one, daemon=True).start()
+            balas(f"🔄 Backtest {symbol} dimulai...")
+
+    # ── /funding ──
+    elif command == "/funding":
+        try:
+            from funding_arbitrage import format_laporan
+            client = ctx.get("client")
+            balas(format_laporan(client=client, top_n=5))
+        except Exception as e:
+            balas(f"⚠️ Funding error: {e}")
+
+    # ── /poly ──
+    elif command == "/poly":
+        try:
+            from polymarket import get_poly_engine
+            eng = get_poly_engine()
+            if eng:
+                balas(eng.format_telegram())
+            else:
+                balas(
+                    "🎯 <b>Polymarket Engine</b>\n\n"
+                    "Status: Belum aktif\n\n"
+                    "Untuk mengaktifkan, set di Railway/Render Variables:\n"
+                    "<code>POLY_PRIVATE_KEY = your_private_key</code>\n"
+                    "<code>POLY_API_KEY     = your_api_key</code>\n"
+                    "<code>POLY_SECRET      = your_secret</code>\n"
+                    "<code>POLY_PASSPHRASE  = your_passphrase</code>\n"
+                    "<code>POLY_AKTIF       = true</code>"
+                )
+        except Exception as e:
+            balas(f"⚠️ Poly error: {e}")
+
+    # ── /poly_on ──
+    elif command == "/poly_on":
+        try:
+            from polymarket import _poly_engine
+            if _poly_engine:
+                _poly_engine.paper_mode = False
+                balas("🔴 <b>Polymarket LIVE mode aktif!</b>\nOrder nyata akan dieksekusi.")
+            else:
+                balas("⚠️ Polymarket engine belum berjalan.")
+        except Exception as e:
+            balas(f"⚠️ Error: {e}")
+
+    # ── /poly_off ──
+    elif command == "/poly_off":
+        try:
+            from polymarket import _poly_engine
+            if _poly_engine:
+                _poly_engine.paper_mode = True
+                balas("📝 <b>Polymarket kembali ke PAPER mode.</b>")
+            else:
+                balas("⚠️ Polymarket engine belum berjalan.")
+        except Exception as e:
+            balas(f"⚠️ Error: {e}")
 
     else:
         balas(f"❓ Command tidak dikenali: {command}\nKetik /help untuk daftar command.")
