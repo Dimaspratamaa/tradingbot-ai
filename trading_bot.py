@@ -54,6 +54,7 @@ from dashboard import mulai_dashboard
 from polymarket import init_poly_engine, get_poly_engine
 from funding_arbitrage import jalankan_funding_scan, format_laporan as funding_laporan
 from weekly_report import cek_jadwal_weekly, jalankan_backtest_manual
+from whale_tracker import cek_whale_alert, mulai_whale_monitor
 from websocket_manager import (
     init_websocket, get_harga, get_all_tickers_ws,
     get_spread_pct, price_cache, alert_engine,

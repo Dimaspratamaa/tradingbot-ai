@@ -64,7 +64,7 @@ def get_whale_transactions():
                             "sumber"   : "whale-alert",
                             "tipe"     : _klasifikasi_whale(t)
                         })
-        except:
+        except Exception as _e:
             pass
 
         return transaksi
@@ -293,3 +293,183 @@ def print_whale_status(symbol):
     print(f"  {em} Whale {symbol}: {w['sinyal']} | "
           f"+{w['skor_buy']}/-{w['skor_sell']} | "
           f"{w['n_transaksi']} tx")
+
+# ══════════════════════════════════════════════
+# UPGRADE v2.0 — Real-time Alert & Alpha Integration
+# ══════════════════════════════════════════════
+
+import threading
+import pathlib
+import json
+
+BASE_DIR        = pathlib.Path(__file__).parent
+ALERT_STATE_FILE= BASE_DIR / "whale_alert_state.json"
+
+# State: track whale yang sudah di-alert agar tidak double
+_alerted_ids    = set()
+_monitor_thread = None
+_running        = False
+
+MONITOR_INTERVAL = 300   # cek setiap 5 menit
+WHALE_ALERT_USD  = 5_000_000  # alert jika > $5M
+
+
+def _load_alerted():
+    """Load ID transaksi yang sudah di-alert."""
+    global _alerted_ids
+    if ALERT_STATE_FILE.exists():
+        try:
+            data = json.loads(ALERT_STATE_FILE.read_text())
+            _alerted_ids = set(data.get("alerted", []))
+        except Exception:
+            _alerted_ids = set()
+
+
+def _save_alerted():
+    """Simpan ID yang sudah di-alert (max 500 terakhir)."""
+    try:
+        alerted_list = list(_alerted_ids)[-500:]
+        ALERT_STATE_FILE.write_text(
+            json.dumps({"alerted": alerted_list}, indent=2))
+    except Exception:
+        pass
+
+
+def cek_whale_alert(posisi_aktif, kirim_telegram, client=None):
+    """
+    Cek aktivitas whale untuk koin yang sedang di-hold.
+    Kirim alert ke Telegram jika ada whale besar masuk/keluar.
+
+    Dipanggil dari main loop setiap 5 menit.
+
+    Args:
+        posisi_aktif : dict posisi spot aktif
+        kirim_telegram: fungsi kirim pesan
+        client       : Binance client (opsional)
+    """
+    if not posisi_aktif:
+        return
+
+    koin_aktif = [s for s, p in posisi_aktif.items() if p.get("aktif")]
+    if not koin_aktif:
+        return
+
+    _load_alerted()
+
+    for symbol in koin_aktif[:3]:  # max 3 koin agar tidak spam API
+        try:
+            whale = analisis_whale_signal(symbol)
+
+            # Skip jika tidak ada alert
+            if not whale.get("alert"):
+                continue
+
+            # Buat ID unik untuk transaksi ini (berdasarkan waktu+symbol)
+            alert_id = f"{symbol}_{int(time.time() // 300)}"  # unik per 5 menit
+
+            if alert_id in _alerted_ids:
+                continue  # Sudah di-alert
+
+            _alerted_ids.add(alert_id)
+            _save_alerted()
+
+            # Format pesan alert
+            sinyal  = whale["sinyal"]
+            em_sinyal = {
+                "BULLISH": "🟢", "BEARISH": "🔴",
+                "MIXED"  : "🟡", "NETRAL" : "⚪"
+            }.get(sinyal, "⚪")
+
+            detail_str = "\n".join(
+                f"  {d}" for d in whale["detail"][:3])
+
+            # Hitung estimasi dampak harga
+            net_flow = whale["withdrawal_total"] - whale["deposit_total"]
+            dampak   = "Bullish ↗" if net_flow > 0 else "Bearish ↘"
+
+            pesan = (
+                f"🐳 <b>WHALE ALERT — {symbol}</b>\n"
+                f"{'─'*24}\n"
+                f"{em_sinyal} Sinyal : <b>{sinyal}</b>\n"
+                f"📊 Detail:\n{detail_str}\n\n"
+                f"💰 Net flow : {'+' if net_flow >= 0 else ''}"
+                f"${net_flow/1e6:.1f}M\n"
+                f"🎯 Dampak   : {dampak}\n"
+                f"📌 Koin hold: {symbol}\n"
+                f"🕐 {datetime.now().strftime('%H:%M WIB')}"
+            )
+
+            kirim_telegram(pesan)
+            print(f"  🐳 [WHALE] Alert terkirim: {symbol} {sinyal}")
+
+        except Exception as e:
+            print(f"  ⚠️  [WHALE] Alert error {symbol}: {e}")
+
+
+def mulai_whale_monitor(posisi_getter, kirim_telegram,
+                         client=None):
+    """
+    Mulai monitoring whale di background thread.
+    posisi_getter: fungsi yang return dict posisi_spot
+    """
+    global _monitor_thread, _running
+
+    if _running:
+        return
+
+    _running = True
+
+    def _loop():
+        print("  ✅ [WHALE] Monitor thread started")
+        while _running:
+            try:
+                posisi = posisi_getter()
+                cek_whale_alert(posisi, kirim_telegram, client)
+            except Exception as e:
+                print(f"  ⚠️  [WHALE] Monitor error: {e}")
+            time.sleep(MONITOR_INTERVAL)
+
+    _monitor_thread = threading.Thread(target=_loop, daemon=True)
+    _monitor_thread.start()
+
+
+def hentikan_whale_monitor():
+    """Hentikan whale monitor."""
+    global _running
+    _running = False
+
+
+def format_whale_telegram(symbol, top_n=3):
+    """
+    Format laporan whale untuk /whale Telegram command.
+    """
+    whale  = analisis_whale_signal(symbol)
+    market = get_market_overview()
+
+    sinyal   = whale["sinyal"]
+    em       = {"BULLISH":"🟢","BEARISH":"🔴",
+                "MIXED":"🟡","NETRAL":"⚪"}.get(sinyal,"⚪")
+
+    detail_str = "\n".join(
+        f"  {d}" for d in whale["detail"][:5])
+    if not whale["detail"]:
+        detail_str = "  Tidak ada aktivitas signifikan"
+
+    net = whale["withdrawal_total"] - whale["deposit_total"]
+
+    teks = (
+        f"🐳 <b>Whale Tracker — {symbol}</b>\n"
+        f"{'─'*26}\n"
+        f"{em} Sinyal     : <b>{sinyal}</b>\n"
+        f"📊 Skor       : +{whale['skor_buy']} buy / -{whale['skor_sell']} sell\n"
+        f"💸 Withdrawal : ${whale['withdrawal_total']/1e6:.2f}M\n"
+        f"💰 Deposit    : ${whale['deposit_total']/1e6:.2f}M\n"
+        f"📈 Net flow   : {'+'if net>=0 else''}${net/1e6:.2f}M\n\n"
+        f"📋 Detail:\n{detail_str}\n\n"
+        f"🌐 <b>Market Global:</b>\n"
+        f"  BTC dominance: {market.get('btc_dominance',0):.1f}%\n"
+        f"  Total MCap   : ${market.get('total_mcap_b',0):.0f}B\n"
+        f"  24H change   : {market.get('change_24h',0):+.2f}%\n"
+        f"  Regime       : {market.get('sinyal_dom','?')}"
+    )
+    return teks

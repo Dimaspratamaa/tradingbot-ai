@@ -782,6 +782,19 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
         except Exception as e:
             balas(f"⚠️ WebSocket status error: {e}")
 
+    # ── /whale ──
+    elif command == "/whale":
+        symbol = parts[1].upper() if len(parts) >= 2 else "BTCUSDT"
+        if not symbol.endswith("USDT"):
+            symbol += "USDT"
+        try:
+            from whale_tracker import format_whale_telegram
+            balas("🔄 Mengambil data whale...")
+            pesan = format_whale_telegram(symbol)
+            balas(pesan)
+        except Exception as e:
+            balas(f"⚠️ Whale error: {e}")
+
     # ── /backtest ──
     elif command == "/backtest":
         client = ctx.get("client")
