@@ -45,6 +45,7 @@ from pattern_detector import analisis_pattern_quant, print_quant_analysis
 from ml_ensemble import prediksi_ensemble, load_ensemble, get_model_accuracy_live
 from portfolio_optimizer import get_portfolio_optimizer, hitung_statistik_riwayat
 from execution_engine import get_execution_engine, hitung_breakeven
+from orchestrator import orchestrate, update_agent_weights, format_orchestrator_status
 from alpha_engine import (
     get_alpha_engine, extract_sinyal, extract_alpha_signals,
     hitung_alpha_score, catat_alpha_result
@@ -55,6 +56,7 @@ from polymarket import init_poly_engine, get_poly_engine
 from funding_arbitrage import jalankan_funding_scan, format_laporan as funding_laporan
 from weekly_report import cek_jadwal_weekly, jalankan_backtest_manual
 from whale_tracker import cek_whale_alert, mulai_whale_monitor
+from grid_trading import (auto_switch_grid, cek_grid_fills, format_grid_laporan)
 from websocket_manager import (
     init_websocket, get_harga, get_all_tickers_ws,
     get_spread_pct, price_cache, alert_engine,
@@ -546,6 +548,23 @@ def simpan_transaksi(symbol, harga_beli, harga_jual,
     with open("riwayat_trade.json", "w") as f:
         json.dump(riwayat, f, indent=2)
     print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}% | {alasan}")
+
+    # Update orchestrator agent weights (belajar dari hasil)
+    try:
+        # Ambil votes dari cache jika ada
+        _orch_votes = getattr(simpan_transaksi, '_last_votes', {})
+        if _orch_votes:
+            update_agent_weights(_orch_votes, profit_pct)
+    except Exception:
+        pass
+
+    # Update Orchestrator weights berdasarkan hasil trade
+    try:
+        orch_votes = posisi_spot.get(symbol, {}).get("_orch_votes", {})
+        if orch_votes:
+            update_agent_weights(orch_votes, profit_pct)
+    except Exception:
+        pass  # non-critical
 
     # Update consecutive loss tracker + alert jika streak tinggi
     try:
@@ -1147,6 +1166,40 @@ def hitung_skor_koin(symbol):
         alpha_score = 50.0
     # ═══════════════════════════════════════════
 
+    # ══ ORCHESTRATOR — Keputusan Final ════════
+    try:
+        orch = orchestrate(
+            symbol      = symbol,
+            df          = df,
+            harga       = ind["harga"],
+            atr         = ind["atr"],
+            saldo       = 0,
+            posisi_spot = posisi_spot,
+            client      = client,
+            ind         = ind,
+            sinyal_raw  = "BUY" if skor >= MIN_SCORE_SPOT else "HOLD",
+            skor_buy    = max(0, skor),
+            sentiment   = sent,
+            onchain     = onchain,
+            mtf         = mtf,
+            geo         = geo,
+            macro       = macro,
+            orderbook   = ob,
+            market      = btc,
+        )
+        # Override skor dengan orchestrator jika confidence tinggi
+        if orch["keputusan"] == "BUY" and orch["confidence"] >= 0.65:
+            skor = max(skor, MIN_SCORE_SPOT)
+        elif orch["keputusan"] == "HOLD" and orch["confidence"] >= 0.70:
+            skor = min(skor, MIN_SCORE_SPOT - 1)
+        elif orch["veto"]:
+            skor = 0  # Risk veto → reset skor
+
+    except Exception as _e:
+        orch = {"keputusan": "HOLD", "confidence": 0.5,
+                "skor_final": 0, "veto": False, "detail": []}
+    # ═══════════════════════════════════════════
+
     return {
         "symbol":symbol,"skor":skor,"harga":ind["harga"],"rsi":ind["rsi"],
         "alpha_sigs":alpha_sigs if 'alpha_sigs' in dir() else {},
@@ -1154,7 +1207,8 @@ def hitung_skor_koin(symbol):
         "atr":ind["atr"],"momentum":ind["momentum"],"ml_pred":ml_pred,
         "ml_conf":ml_conf,"bayes":bh["prob_buy"],"detail":detail,
         "ind":ind,"df":df,"geo":geo,"mtf":mtf,"ob":ob,"mx":mx,
-        "btc":btc,"sent":sent,"macro":macro,"depth":depth,"onchain_pro":onchain_pro
+        "btc":btc,"sent":sent,"macro":macro,"depth":depth,"onchain_pro":onchain_pro,
+        "orch":orch,
     }
 
 # ══════════════════════════════════════════════
@@ -2004,9 +2058,45 @@ def jalankan_siklus(siklus, mode_cepat=False):
         elif skor>=MIN_SCORE_SPOT and slot_spot>0 \
              and hasil["mtf"]["cukup_bullish"] \
              and not hasil["ob"]["block_entry"]:
-            print(f"\n  💰 [{symbol}] → SPOT BUY (Skor:{skor})")
-            buka_posisi_spot(hasil)
-            slot_spot-=1;n_spot+=1
+
+            # ── ORCHESTRATOR: Konfirmasi dari semua agent ──
+            orch_ok = True
+            try:
+                orch = orchestrate(
+                    symbol     = symbol,
+                    df         = hasil.get("df"),
+                    harga      = harga,
+                    atr        = atr,
+                    saldo      = saldo,
+                    posisi_spot= posisi_spot,
+                    client     = client,
+                    ind        = hasil.get("ind", {}),
+                    sinyal_raw = hasil.get("sinyal", "HOLD"),
+                    skor_buy   = skor,
+                    sentiment  = hasil.get("sentiment"),
+                    onchain    = hasil.get("onchain"),
+                    mtf        = hasil.get("mtf"),
+                    macro      = hasil.get("macro"),
+                    orderbook  = hasil.get("ob"),
+                )
+                orch_ok  = orch["keputusan"] == "BUY"
+                conf     = orch["confidence"]
+                n_buy_ag = orch["n_buy"]
+                n_tot_ag = len(orch["votes"])
+                print(f"  🎯 [{symbol}] Orch: {orch['keputusan']} "
+                      f"conf={conf:.2f} "
+                      f"({n_buy_ag}/{n_tot_ag} agents BUY)")
+                if not orch_ok:
+                    print(f"  🚫 [{symbol}] Orchestrator HOLD/SELL — skip entry")
+                # Simpan votes untuk weight update nanti
+                hasil["_orch_votes"] = orch.get("votes", {})
+            except Exception as _e:
+                print(f"  ⚠️  [{symbol}] Orch error: {_e} — lanjut tanpa orch")
+
+            if orch_ok:
+                print(f"\n  💰 [{symbol}] → SPOT BUY (Skor:{skor})")
+                buka_posisi_spot(hasil)
+                slot_spot-=1;n_spot+=1
 
 # ── MAIN ──────────────════════════════════════
 print("="*65)

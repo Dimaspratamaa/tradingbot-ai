@@ -782,6 +782,14 @@ def _proses_command(teks, tg_token, tg_chat_id, ctx):
         except Exception as e:
             balas(f"⚠️ WebSocket status error: {e}")
 
+    # ── /orch ──
+    elif command == "/orch":
+        try:
+            from orchestrator import format_orchestrator_status
+            balas(format_orchestrator_status())
+        except Exception as e:
+            balas(f"⚠️ Orchestrator error: {e}")
+
     # ── /whale ──
     elif command == "/whale":
         symbol = parts[1].upper() if len(parts) >= 2 else "BTCUSDT"
