@@ -104,6 +104,7 @@ import joblib
 import warnings
 import signal
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 warnings.filterwarnings('ignore')
 
@@ -212,6 +213,7 @@ SCAN_INTERVAL          = SCAN_FULL_INTERVAL
 
 # ── STATE ─────────────────────────────────────
 posisi_spot      = {}
+_posisi_lock     = threading.Lock()   # FIX: Lock untuk cegah race condition
 onchain_cache    = {"data": None, "waktu": 0}
 geo_cache        = {"data": None, "waktu": 0}
 koin_cache       = {"data": [], "waktu": 0}
@@ -464,21 +466,51 @@ def reconnect_client():
         log_error("op", _e)
         return False
 
+# ── THREAD-SAFE POSISI HELPERS (FIX Race Condition) ──────────────────────────
+def posisi_set(symbol, data):
+    """Set posisi dengan thread lock."""
+    with _posisi_lock:
+        posisi_spot[symbol] = data
+
+def posisi_update(symbol, key, value):
+    """Update satu field posisi dengan thread lock."""
+    with _posisi_lock:
+        if symbol in posisi_spot:
+            posisi_spot[symbol][key] = value
+
+def posisi_get(symbol):
+    """Get posisi dengan thread lock (return None jika tidak ada)."""
+    with _posisi_lock:
+        return posisi_spot.get(symbol)
+
+def posisi_hapus(symbol):
+    """Hapus posisi dengan thread lock."""
+    with _posisi_lock:
+        posisi_spot.pop(symbol, None)
+
+def posisi_keys():
+    """Ambil list symbol posisi aktif secara thread-safe."""
+    with _posisi_lock:
+        return list(posisi_spot.keys())
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def simpan_posisi_state():
     """
     Simpan posisi_spot ke JSON agar tidak hilang saat Railway restart.
-    Dipanggil setiap kali posisi berubah (buka/tutup).
+    FIX: Atomic write via storage.py — tidak ada data corrupt saat crash.
     """
     try:
-        state = {
-            "posisi_spot"    : {k: v for k, v in posisi_spot.items()
-                                if v.get("aktif")},
-            "last_entry_time": {k: v for k, v in last_entry_time.items()},
-            "sl_cooldown"    : {k: v for k, v in sl_cooldown.items()},
-            "waktu_simpan"   : time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        with open(POSISI_STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
+        from storage import simpan_json
+        with _posisi_lock:
+            state = {
+                "posisi_spot"    : {k: v for k, v in posisi_spot.items()
+                                    if v.get("aktif")},
+                "last_entry_time": {k: v for k, v in last_entry_time.items()},
+                "sl_cooldown"    : {k: v for k, v in sl_cooldown.items()},
+                "waktu_simpan"   : time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        simpan_json(POSISI_STATE_FILE, state)
     except Exception as e:
         print(f"  ⚠️  Gagal simpan posisi state: {e}")
 
@@ -486,45 +518,44 @@ def simpan_posisi_state():
 def muat_posisi_state():
     """
     Muat posisi_spot dari JSON saat bot startup (setelah Railway restart).
-    Mencegah bot lupa posisi yang sudah terbuka.
+    FIX: Gunakan storage.py — auto-fallback ke .bak jika file utama corrupt.
     """
     global posisi_spot, last_entry_time, sl_cooldown
-    if not os.path.exists(POSISI_STATE_FILE):
+    from storage import muat_json
+    state = muat_json(POSISI_STATE_FILE, default={})
+    if not state:
         return 0
 
     try:
-        with open(POSISI_STATE_FILE) as f:
-            state = json.load(f)
-
         posisi_lama = state.get("posisi_spot", {})
         if not posisi_lama:
             return 0
 
         n_loaded = 0
-        for symbol, pos in posisi_lama.items():
-            if pos.get("aktif"):
-                posisi_spot[symbol] = pos
-                n_loaded += 1
+        with _posisi_lock:
+            for symbol, pos in posisi_lama.items():
+                if pos.get("aktif"):
+                    posisi_spot[symbol] = pos
+                    n_loaded += 1
 
-        # Restore cooldown
+        # Restore cooldown & entry time
         for k, v in state.get("sl_cooldown", {}).items():
             sl_cooldown[k] = v
-
-        # Restore entry time
         for k, v in state.get("last_entry_time", {}).items():
             last_entry_time[k] = v
 
         waktu_simpan = state.get("waktu_simpan", "?")
         if n_loaded > 0:
             print(f"  ✅ Loaded {n_loaded} posisi dari state terakhir ({waktu_simpan})")
-            for sym, pos in posisi_spot.items():
-                if pos.get("aktif"):
-                    jam = (time.time() - time.mktime(
-                        time.strptime(pos["waktu_beli"][:19],
-                                      "%Y-%m-%d %H:%M:%S"))) / 3600
-                    print(f"     {sym}: entry=${pos['harga_beli']:,.4f} "
-                          f"SL=${pos['stop_loss']:,.4f} "
-                          f"hold={jam:.1f}H")
+            with _posisi_lock:
+                for sym, pos in posisi_spot.items():
+                    if pos.get("aktif"):
+                        jam = (time.time() - time.mktime(
+                            time.strptime(pos["waktu_beli"][:19],
+                                          "%Y-%m-%d %H:%M:%S"))) / 3600
+                        print(f"     {sym}: entry=${pos['harga_beli']:,.4f} "
+                              f"SL=${pos['stop_loss']:,.4f} "
+                              f"hold={jam:.1f}H")
         return n_loaded
 
     except Exception as e:
@@ -535,18 +566,13 @@ def muat_posisi_state():
 def simpan_transaksi(symbol, harga_beli, harga_jual,
                      waktu_beli, waktu_jual, alasan, alpha_sigs=None):
     profit_pct = ((harga_jual - harga_beli) / harga_beli) * 100
-    riwayat = []
-    if os.path.exists("riwayat_trade.json"):
-        with open("riwayat_trade.json", "r") as f:
-            riwayat = json.load(f)
-    riwayat.append({
-        "symbol": symbol, "harga_beli": harga_beli,
-        "harga_jual": harga_jual, "profit_pct": round(profit_pct, 4),
-        "waktu_beli": waktu_beli, "waktu_jual": waktu_jual,
-        "alasan": alasan
-    })
-    with open("riwayat_trade.json", "w") as f:
-        json.dump(riwayat, f, indent=2)
+    # FIX #2: Simpan ke SQLite via storage.py (bukan JSON flat file)
+    from storage import simpan_trade
+    simpan_trade(
+        symbol=symbol, harga_beli=harga_beli, harga_jual=harga_jual,
+        profit_pct=round(profit_pct, 4),
+        waktu_beli=waktu_beli, waktu_jual=waktu_jual, alasan=alasan
+    )
     print(f"  💾 [{symbol}] P/L: {profit_pct:+.2f}% | {alasan}")
 
     # Update orchestrator agent weights (belajar dari hasil)
@@ -772,7 +798,11 @@ def update_trailing_spot(symbol, harga_skrng):
     2. Profit 1.5% → Trailing aktif: SL mengikuti harga tertinggi - 1%
     """
     if symbol not in posisi_spot: return False
-    pos = posisi_spot[symbol]
+    # FIX #3: Baca snapshot dengan lock, lalu operasikan di luar lock
+    with _posisi_lock:
+        if symbol not in posisi_spot:
+            return False
+        pos = dict(posisi_spot[symbol])   # snapshot copy — hindari race condition
     if not pos["aktif"]: return False
 
     harga_beli   = pos["harga_beli"]
@@ -783,7 +813,7 @@ def update_trailing_spot(symbol, harga_skrng):
 
     # Update harga tertinggi
     if harga_skrng > harga_tinggi:
-        posisi_spot[symbol]["harga_tertinggi"] = harga_skrng
+        posisi_update(symbol, "harga_tertinggi", harga_skrng)
         harga_tinggi = harga_skrng
 
     # ── STEP 1: Break-Even SL ──────────────────
@@ -795,8 +825,8 @@ def update_trailing_spot(symbol, harga_skrng):
             not pos.get("trailing_aktif")):
         sl_be = harga_beli * (1 + BREAKEVEN_BUFFER / 100)
         if sl_be > sl_saat_ini:
-            posisi_spot[symbol]["stop_loss"]       = sl_be
-            posisi_spot[symbol]["breakeven_aktif"] = True
+            posisi_update(symbol, "stop_loss", sl_be)
+            posisi_update(symbol, "breakeven_aktif", True)
             updated = True
             be_msg = (
                 f"🔒 <b>Break-Even Aktif — {symbol}</b>\n"
@@ -820,9 +850,9 @@ def update_trailing_spot(symbol, harga_skrng):
                 client.order_market_sell(symbol=symbol, quantity=qty_partial)
                 qty_sisa  = round(qty_total - qty_partial, 8)
                 profit_usd= qty_partial * harga_skrng * (profit_pct/100)
-                posisi_spot[symbol]["qty"]                = qty_sisa
-                posisi_spot[symbol]["partial_close_done"] = True
-                posisi_spot[symbol]["partial_profit_locked"] = round(profit_usd, 2)
+                posisi_update(symbol, "qty", qty_sisa)
+                posisi_update(symbol, "partial_close_done", True)
+                posisi_update(symbol, "partial_profit_locked", round(profit_usd, 2))
                 simpan_posisi_state()
                 kirim_telegram(
                     f"✂️ <b>Partial Close — {symbol}</b>\n"
@@ -843,7 +873,7 @@ def update_trailing_spot(symbol, harga_skrng):
     # SL mengikuti harga tertinggi - TRAILING_JARAK (1%)
     if profit_pct >= TRAILING_AKTIVASI:
         if not pos.get("trailing_aktif"):
-            posisi_spot[symbol]["trailing_aktif"] = True
+            posisi_update(symbol, "trailing_aktif", True)
             kirim_telegram(
                 f"🔄 <b>Trailing Aktif — {symbol}</b>\n"
                 f"📈 Profit: +{profit_pct:.2f}%\n"
@@ -854,7 +884,7 @@ def update_trailing_spot(symbol, harga_skrng):
         sl_trail = harga_tinggi * (1 - TRAILING_JARAK / 100)
         sl_trail = max(sl_trail, pos.get("stop_loss", 0))  # SL hanya bisa naik
         if sl_trail > pos["stop_loss"]:
-            posisi_spot[symbol]["stop_loss"] = sl_trail
+            posisi_update(symbol, "stop_loss", sl_trail)
             updated = True
 
     # Auto-save state jika ada perubahan SL
@@ -1241,7 +1271,8 @@ def scan_semua_koin(koin_list, mode_cepat=False):
     # Filter koin yang sudah ada posisi
     to_scan = []
     for symbol in target:
-        spot_aktif    = symbol in posisi_spot and posisi_spot[symbol]["aktif"]
+        _pos = posisi_get(symbol)
+        spot_aktif    = _pos is not None and _pos.get("aktif", False)
         futures_aktif = symbol in posisi_futures and posisi_futures[symbol].get("aktif")
         if not spot_aktif and not futures_aktif:
             to_scan.append(symbol)
@@ -1418,9 +1449,10 @@ def validasi_entry_ketat(symbol, skor, hasil, client):
 # ── CEK SL/TP SPOT ────────────────────────────
 def cek_semua_sl_tp_spot():
     waktu=time.strftime("%Y-%m-%d %H:%M:%S")
-    for symbol in list(posisi_spot.keys()):
-        pos=posisi_spot[symbol]
-        if not pos["aktif"]: continue
+    for symbol in posisi_keys():   # FIX #3: thread-safe keys
+        # Ambil snapshot posisi dengan lock
+        pos = posisi_get(symbol)
+        if pos is None or not pos["aktif"]: continue
         try:
             # WebSocket cache dulu, fallback REST jika stale
             harga = get_harga(symbol, client)
@@ -1446,7 +1478,7 @@ def cek_semua_sl_tp_spot():
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n"
                 f"📋 {early['alasan']}\n🕐 {waktu}"
             )
-            posisi_spot[symbol]["aktif"]=False; simpan_posisi_state()
+            posisi_update(symbol, "aktif", False); simpan_posisi_state()
             try: alert_engine.hapus_posisi(symbol)
             except Exception: pass
             continue
@@ -1467,7 +1499,7 @@ def cek_semua_sl_tp_spot():
                 f"💰 Exit : ${harga:,.4f}\n"
                 f"📈 Profit: <b>+{profit_pct:.2f}%</b> ✅\n🕐 {waktu}"
             )
-            posisi_spot[symbol]["aktif"]=False
+            posisi_update(symbol, "aktif", False)
 
         elif harga<=pos["stop_loss"]:
             alasan="SPOT_TRAILING" if pos.get("trailing_aktif") else "SPOT_SL"
@@ -1492,7 +1524,7 @@ def cek_semua_sl_tp_spot():
                 f"📊 SL mode: {pos.get('sl_kondisi','NORMAL')}\n"
                 f"⏳ Cooldown: {SL_COOLDOWN_JAM} jam\n🕐 {waktu}"
             )
-            posisi_spot[symbol]["aktif"]=False
+            posisi_update(symbol, "aktif", False)
 
         # ── TIME-BASED EXIT: posisi terlalu lama ──────────────
         else:
@@ -1523,7 +1555,7 @@ def cek_semua_sl_tp_spot():
                         f"⏱ Hold: {jam_hold:.0f} jam (max {MAX_HOLD_JAM}H)\n"
                         f"🕐 {waktu}"
                     )
-                    posisi_spot[symbol]["aktif"] = False
+                    posisi_update(symbol, "aktif", False)
                     print(f"  ⏰ [{symbol}] Time exit setelah {jam_hold:.0f}H "
                           f"P/L:{profit_pct:+.2f}%")
             except Exception as _e: pass  # time exit calc
@@ -1779,13 +1811,14 @@ def buka_posisi_spot(hasil):
         _alpha_sinyal_cache[symbol] = hasil.get("_alpha_sinyal", {})
     except Exception:
         pass  # silenced
-    posisi_spot[symbol]={
+    # FIX #3: Gunakan posisi_set (thread-safe)
+    posisi_set(symbol, {
         "aktif":True,"harga_beli":harga,"harga_tertinggi":harga,
         "stop_loss":sl,"take_profit":tp,"waktu_beli":waktu,
         "qty":qty,"atr":atr,"trailing_aktif":False,
         "sl_kondisi":dyn_sl["kondisi"],"sl_multiplier":dyn_sl["multiplier"],
         "modal":modal,"kelly_f":pos_info.get("kelly_f",0)
-    }
+    })
     simpan_posisi_state()  # ← Persist ke disk setelah buka posisi
     # Register ke WebSocket alert engine untuk monitoring real-time
     try:
@@ -2016,7 +2049,8 @@ def jalankan_siklus(siklus, mode_cepat=False):
         mode_fut=hasil["mode_futures"];harga=hasil["harga"]
         atr=hasil["atr"];detail_str=" | ".join(hasil["detail"])
 
-        if (symbol in posisi_spot and posisi_spot[symbol]["aktif"]) or \
+        _p = posisi_get(symbol)
+        if (_p is not None and _p.get("aktif")) or \
            (symbol in posisi_futures and posisi_futures[symbol].get("aktif")):
             continue
 
@@ -2144,6 +2178,11 @@ kirim_telegram(
 print("\n💰 Saldo:")
 cek_saldo_semua_exchange(client)
 print_exchange_status()
+
+# ── Inisialisasi database SQLite (FIX #2) ────────
+from storage import init_db
+init_db()
+print("  🗄️  Database SQLite siap")
 
 # ── Muat posisi dari state terakhir (restart-safe) ──
 print("\n  📂 Memuat posisi state terakhir...")
