@@ -1133,9 +1133,8 @@ def hitung_ukuran_posisi_risiko(saldo_usdt, harga_entry, sl_price,
         sizing_factor = sf_data.get("factor", 1.0)
     modal_risiko *= sizing_factor
 
-    # Clamp ke batas aman
-    from trading_bot import (MAX_MODAL_PER_TRADE, MIN_MODAL_PER_TRADE,
-                              MAX_PORTFOLIO_RISK_PCT)
+    # Clamp ke batas aman — FIX: import dari config.py (bukan trading_bot, cegah circular import)
+    from config import MAX_MODAL_PER_TRADE, MIN_MODAL_PER_TRADE, MAX_PORTFOLIO_RISK_PCT
     modal_final = max(
         MIN_MODAL_PER_TRADE,
         min(MAX_MODAL_PER_TRADE,

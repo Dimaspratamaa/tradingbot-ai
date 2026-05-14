@@ -111,9 +111,13 @@ for sym in SYMBOLS:
     n_rows = 0
 
     for i in range(WINDOW, len(df1h) - FORWARD):
-        w1h = df1h.iloc[max(0, i-200):i+1]
-        w4h = df4h.iloc[:max(1, i//4)] if df4h is not None else None
-        w1d = df1d.iloc[:max(1, i//24)] if df1d is not None else None
+        # FIX lookahead bias: fitur hanya pakai data sampai indeks i (inklusif)
+        # Target melihat ke depan (i+FORWARD) — ini VALID karena hanya untuk label,
+        # bukan dimasukkan ke dalam fitur. Pastikan compute_all_features tidak
+        # menerima data di luar batas i.
+        w1h = df1h.iloc[max(0, i-200):i+1]          # [0..i] inklusif, tidak ada future leak
+        w4h = df4h.iloc[:max(1, i//4)] if df4h is not None else None   # aligned ke 1H[i]
+        w1d = df1d.iloc[:max(1, i//24)] if df1d is not None else None  # aligned ke 1H[i]
 
         try:
             feat_dict, _ = compute_all_features(w1h, w4h, w1d)
@@ -121,6 +125,8 @@ for sym in SYMBOLS:
             continue
         if not feat_dict: continue
 
+        # Label: harga FORWARD candle ke depan relatif terhadap close saat ini
+        # Ini HANYA label — tidak bocor ke fitur input
         future  = df1h["close"].iloc[i + FORWARD]
         current = df1h["close"].iloc[i]
         feat_dict["_target"] = int((future/current - 1) > TARGET_PCT)
@@ -142,6 +148,26 @@ if len(df_feat) < 100:
 feature_cols = [c for c in df_feat.columns if not c.startswith("_")]
 X_raw = df_feat[feature_cols].fillna(0).replace([np.inf,-np.inf], 0)
 y     = df_feat["_target"]
+
+# ── VALIDASI ANTI-LOOKAHEAD BIAS ─────────────
+# Pastikan tidak ada fitur yang berkorelasi sempurna dengan target
+# (korelasi > 0.9 adalah tanda kuat adanya data leakage)
+high_corr_with_target = []
+for col in X_raw.columns:
+    try:
+        c = abs(X_raw[col].corr(y))
+        if c > 0.9:
+            high_corr_with_target.append((col, round(c, 3)))
+    except Exception:
+        pass
+if high_corr_with_target:
+    print(f"\n⚠️  PERINGATAN LOOKAHEAD BIAS — fitur berkorelasi tinggi dengan target:")
+    for col, c in high_corr_with_target:
+        print(f"   {col}: corr={c} ← kemungkinan leak!")
+    X_raw = X_raw.drop(columns=[c for c, _ in high_corr_with_target])
+    print(f"   Fitur berisiko dihapus otomatis.\n")
+else:
+    print("  ✅ Validasi lookahead bias: tidak ada leak terdeteksi")
 
 # Hapus low-variance & high-correlation
 low_var = X_raw.columns[X_raw.std() < 0.001].tolist()

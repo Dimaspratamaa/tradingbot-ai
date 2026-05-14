@@ -1,0 +1,9 @@
+# Jangan pernah commit file ini ke GitHub
+.env
+*.pkl
+*.json
+__pycache__/
+*.pyc
+logs/
+data/
+.DS_Store
